@@ -510,7 +510,7 @@ export default function App() {
       elements: pg.elements.map(e => {
         if (!ids.has(e.id)) return e
         if (e.type === 'ink') return { ...e, color: c }
-        return { ...e, filled: true, color: c, strokeColor: c }
+        return { ...e, filled: true, color: c } // keep the border in its own color
       }),
     })))
   }, [commit])
@@ -1239,8 +1239,8 @@ export default function App() {
                     <circle
                       cx={el.x} cy={el.y} r={el.size / 2}
                       fill={el.filled ? (el.color || INK) : 'transparent'}
-                      stroke={el.filled ? 'none' : outline}
-                      strokeOpacity={el.filled ? 1 : outlineOp}
+                      stroke={outline}
+                      strokeOpacity={outlineOp}
                       strokeWidth={outlineW}
                     />
                     {selected && <circle cx={el.x} cy={el.y} r={el.size / 2 + 4 / view.scale} fill="none" stroke={ACCENT} strokeWidth={hair} />}
@@ -1251,8 +1251,8 @@ export default function App() {
                     <rect
                       x={el.x - el.size / 2} y={el.y - el.size / 2} width={el.size} height={el.size}
                       fill={el.filled ? (el.color || INK) : 'transparent'}
-                      stroke={el.filled ? 'none' : outline}
-                      strokeOpacity={el.filled ? 1 : outlineOp}
+                      stroke={outline}
+                      strokeOpacity={outlineOp}
                       strokeWidth={outlineW}
                     />
                     {selected && (
@@ -1711,10 +1711,12 @@ function AssetThumb({ asset }) {
           stroke={it.color || INK} strokeWidth={sw * 2} strokeLinejoin="round" strokeLinecap="round" />
       ) : it.shape === 'circle' ? (
         <circle key={i} cx={it.dx} cy={it.dy} r={it.size / 2}
-          fill={it.filled ? (it.color || INK) : 'none'} stroke={it.filled ? 'none' : INK_DIM} strokeWidth={sw} />
+          fill={it.filled ? (it.color || INK) : 'none'}
+          stroke={it.strokeColor && it.strokeColor !== INK ? it.strokeColor : INK_DIM} strokeWidth={sw} />
       ) : (
         <rect key={i} x={it.dx - it.size / 2} y={it.dy - it.size / 2} width={it.size} height={it.size}
-          fill={it.filled ? (it.color || INK) : 'none'} stroke={it.filled ? 'none' : INK_DIM} strokeWidth={sw} />
+          fill={it.filled ? (it.color || INK) : 'none'}
+          stroke={it.strokeColor && it.strokeColor !== INK ? it.strokeColor : INK_DIM} strokeWidth={sw} />
       ))}
     </svg>
   )
