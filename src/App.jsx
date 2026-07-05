@@ -16,6 +16,16 @@ const INK_DIM = 'rgba(26,26,26,0.30)'
 const ACCENT = '#E34234'
 const ACCENT_60 = 'rgba(227,66,52,0.60)'
 
+/* muted, faded fill palette — ink first (default) */
+const PALETTE = [
+  '#1A1A1A', // ink
+  '#B0685C', // dusty terracotta
+  '#B89B5E', // faded ochre
+  '#7F9183', // sage
+  '#7C8DA0', // dusty blue
+  '#8E7B94', // muted plum
+]
+
 const MIN_ZOOM = 0.1
 const MAX_ZOOM = 8
 const DEFAULT_SIZE = 40      // world units (~40px at 100%)
@@ -276,8 +286,11 @@ export default function App() {
   const selRef = useRef(sel); selRef.current = sel
   const [selectMode, setSelectMode] = useState(false)
   const selectModeRef = useRef(selectMode); selectModeRef.current = selectMode
-  const [tool, setTool] = useState(null) // 'circle' | 'square' | null
+  const [tool, setTool] = useState(null) // 'circle' | 'square' | 'select' | null
   const toolRef = useRef(tool); toolRef.current = tool
+  const [activeColor, setActiveColor] = useState(PALETTE[0])
+  const activeColorRef = useRef(activeColor); activeColorRef.current = activeColor
+  const [marquee, setMarquee] = useState(null) // {x1,y1,x2,y2} world
   const [guides, setGuides] = useState(null)
   const [ghost, setGhost] = useState(null) // {x,y,shape} or {x,y,asset} screen coords
   const [libOpen, setLibOpen] = useState(false)
@@ -329,7 +342,7 @@ export default function App() {
   /* ----- mutations ----- */
   const placeElement = useCallback((shape, wx, wy, withSnap = true) => {
     const p = pageRef.current
-    let el = { id: uid(), shape, x: wx, y: wy, size: DEFAULT_SIZE, filled: false, groupId: null }
+    let el = { id: uid(), shape, x: wx, y: wy, size: DEFAULT_SIZE, filled: false, color: activeColorRef.current, groupId: null }
     if (withSnap) {
       const th = SNAP_PX / viewRef.current.scale
       const { ax, ay } = computeSnap([el], p.elements, th)
@@ -338,10 +351,26 @@ export default function App() {
     commit(d => updatePage(d, p.id, pg => ({ ...pg, elements: [...pg.elements, el] })))
   }, [commit])
 
+  /* tap: empty → fill with active color; filled in another color → recolor; same color → empty */
   const toggleFill = useCallback((id) => {
+    const c = activeColorRef.current
     commit(d => updatePage(d, pageIdRef.current, pg => ({
       ...pg,
-      elements: pg.elements.map(e => (e.id === id ? { ...e, filled: !e.filled } : e)),
+      elements: pg.elements.map(e => {
+        if (e.id !== id) return e
+        if (!e.filled) return { ...e, filled: true, color: c }
+        if ((e.color || INK) !== c) return { ...e, color: c }
+        return { ...e, filled: false }
+      }),
+    })))
+  }, [commit])
+
+  const applyColorToSelection = useCallback((c) => {
+    const ids = selRef.current
+    if (!ids.size) return
+    commit(d => updatePage(d, pageIdRef.current, pg => ({
+      ...pg,
+      elements: pg.elements.map(e => (ids.has(e.id) ? { ...e, filled: true, color: c } : e)),
     })))
   }, [commit])
 
@@ -433,7 +462,7 @@ export default function App() {
     const src = p.elements.filter(e => ids.has(e.id))
     const bb = bboxOf(src)
     const grouped = src.length > 1 && src.every(e => e.groupId && e.groupId === src[0].groupId)
-    const items = src.map(e => ({ shape: e.shape, dx: e.x - bb.cx, dy: e.y - bb.cy, size: e.size, filled: e.filled }))
+    const items = src.map(e => ({ shape: e.shape, dx: e.x - bb.cx, dy: e.y - bb.cy, size: e.size, filled: e.filled, color: e.color || INK }))
     const asset = { id: uid('a'), items, grouped, w: bb.w, h: bb.h }
     commit(d => ({ ...d, library: [...d.library, asset] }))
     setLibOpen(true)
@@ -447,7 +476,7 @@ export default function App() {
     const p = pageRef.current
     const g = asset.grouped ? uid('g') : null
     let els = asset.items.map(it => ({
-      id: uid(), shape: it.shape, x: wx + it.dx, y: wy + it.dy, size: it.size, filled: it.filled, groupId: g,
+      id: uid(), shape: it.shape, x: wx + it.dx, y: wy + it.dy, size: it.size, filled: it.filled, color: it.color || INK, groupId: g,
     }))
     const th = SNAP_PX / viewRef.current.scale
     const { ax, ay } = computeSnap(els, p.elements, th)
@@ -524,6 +553,10 @@ export default function App() {
     const pt = { x: e.clientX, y: e.clientY }
     pointers.current.set(e.pointerId, pt)
     if (startPinchIfTwo()) return
+    if (toolRef.current === 'select' && !forcePan) {
+      gesture.current = { type: 'marquee', start: pt, world0: toWorld(pt.x, pt.y), moved: false }
+      return
+    }
     gesture.current = { type: 'canvas', start: pt, view0: viewRef.current, moved: false, forcePan }
   }
 
@@ -554,6 +587,23 @@ export default function App() {
       const dx = pt.x - g.start.x, dy = pt.y - g.start.y
       if (!g.moved && Math.hypot(dx, dy) > TAP_PX) g.moved = true
       if (g.moved) setView({ ...g.view0, tx: g.view0.tx + dx, ty: g.view0.ty + dy })
+      return
+    }
+
+    if (g.type === 'marquee') {
+      if (!g.moved && dist(pt, g.start) > TAP_PX) g.moved = true
+      if (!g.moved) return
+      const w = toWorld(pt.x, pt.y)
+      const rect = {
+        x1: Math.min(g.world0.x, w.x), y1: Math.min(g.world0.y, w.y),
+        x2: Math.max(g.world0.x, w.x), y2: Math.max(g.world0.y, w.y),
+      }
+      setMarquee(rect)
+      const hit = pageRef.current.elements.filter(el => {
+        const bb = elBBox(el)
+        return bb.r >= rect.x1 && bb.l <= rect.x2 && bb.b >= rect.y1 && bb.t <= rect.y2
+      }).map(el => el.id)
+      setSel(expandSel(hit))
       return
     }
 
@@ -621,7 +671,8 @@ export default function App() {
         setGuides(null)
       } else if (!g.longPressed) {
         // tap
-        if (selectModeRef.current) {
+        if (selectModeRef.current || toolRef.current === 'select') {
+          if (!selectModeRef.current) setSelectMode(true)
           const add = expandSel([g.id])
           setSel(prev => {
             const n = new Set(prev)
@@ -643,6 +694,16 @@ export default function App() {
       return
     }
 
+    if (g.type === 'marquee') {
+      setMarquee(null)
+      if (g.moved) {
+        setSelectMode(selRef.current.size > 0)
+      } else {
+        setSel(new Set()); setSelectMode(false)
+      }
+      return
+    }
+
     if (g.type === 'canvas') {
       if (!g.moved) {
         // tap on empty canvas
@@ -654,7 +715,7 @@ export default function App() {
           return
         }
         lastCanvasTap.current = { ...pt, t: now }
-        if (toolRef.current) {
+        if (toolRef.current && toolRef.current !== 'select') {
           const w = toWorld(pt.x, pt.y)
           placeElement(toolRef.current, w.x, w.y)
         } else {
@@ -818,7 +879,7 @@ export default function App() {
                     <circle cx={el.x} cy={el.y} r={hitR} fill="transparent" />
                     <circle
                       cx={el.x} cy={el.y} r={el.size / 2}
-                      fill={el.filled ? INK : 'transparent'}
+                      fill={el.filled ? (el.color || INK) : 'transparent'}
                       stroke={el.filled ? 'none' : INK_DIM}
                       strokeWidth={hair}
                     />
@@ -829,7 +890,7 @@ export default function App() {
                     <rect x={el.x - hitR} y={el.y - hitR} width={hitR * 2} height={hitR * 2} fill="transparent" />
                     <rect
                       x={el.x - el.size / 2} y={el.y - el.size / 2} width={el.size} height={el.size}
-                      fill={el.filled ? INK : 'transparent'}
+                      fill={el.filled ? (el.color || INK) : 'transparent'}
                       stroke={el.filled ? 'none' : INK_DIM}
                       strokeWidth={hair}
                     />
@@ -882,6 +943,17 @@ export default function App() {
                 </g>
               ))}
             </g>
+          )}
+
+          {/* marquee selection rectangle */}
+          {marquee && (
+            <rect
+              x={marquee.x1} y={marquee.y1}
+              width={marquee.x2 - marquee.x1} height={marquee.y2 - marquee.y1}
+              fill="rgba(227,66,52,0.04)" stroke={ACCENT_60} strokeWidth={hair}
+              strokeDasharray={`${4 / view.scale} ${3 / view.scale}`}
+              pointerEvents="none"
+            />
           )}
 
           {/* resize handles: single free element */}
@@ -945,9 +1017,36 @@ export default function App() {
       {/* ---- toolbar (bottom center) ---- */}
       <div style={{
         position: 'absolute', bottom: 20, left: '50%', transform: 'translateX(-50%)',
-        display: 'flex', gap: 1, border: `1px solid ${INK}`, background: PAPER,
-        touchAction: 'none',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
       }}>
+        {/* muted fill palette */}
+        <div style={{ display: 'flex', gap: 8, padding: '4px 2px' }}>
+          {PALETTE.map(c => (
+            <button
+              key={c}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={() => { setActiveColor(c); if (selRef.current.size) applyColorToSelection(c) }}
+              title={c}
+              style={{
+                width: 16, height: 16, borderRadius: '50%', padding: 0, cursor: 'pointer',
+                background: c,
+                border: 'none',
+                outline: activeColor === c ? `1px solid ${ACCENT}` : '1px solid rgba(26,26,26,0.15)',
+                outlineOffset: 2,
+              }}
+            />
+          ))}
+        </div>
+        <div style={{
+          display: 'flex', gap: 1, border: `1px solid ${INK}`, background: PAPER,
+          touchAction: 'none',
+        }}>
+        <ToolBtn active={tool === 'select'} onPointerDown={(e) => e.stopPropagation()} onClick={() => setTool(t => (t === 'select' ? null : 'select'))}>
+          <svg width="18" height="18" viewBox="0 0 18 18">
+            <rect x="2.5" y="2.5" width="13" height="13" fill="none"
+              stroke={tool === 'select' ? ACCENT : INK} strokeWidth="1" strokeDasharray="3 2.2" />
+          </svg>
+        </ToolBtn>
         <ToolBtn active={tool === 'circle'} onPointerDown={beginToolDrag('circle')}>
           <svg width="18" height="18" viewBox="0 0 18 18">
             <circle cx="9" cy="9" r="7" fill="none" stroke={tool === 'circle' ? ACCENT : INK} strokeWidth="1" />
@@ -965,6 +1064,7 @@ export default function App() {
         <ToolBtn onPointerDown={(e) => { e.stopPropagation() }} onClick={redo}>
           <span style={{ fontSize: 14, color: INK }}>↻</span>
         </ToolBtn>
+        </div>
       </div>
 
       {/* ---- zoom HUD (bottom right) ---- */}
@@ -1166,10 +1266,10 @@ function AssetThumb({ asset }) {
     <svg width="100%" height="100%" viewBox={vb} preserveAspectRatio="xMidYMid meet" style={{ pointerEvents: 'none' }}>
       {asset.items.map((it, i) => it.shape === 'circle' ? (
         <circle key={i} cx={it.dx} cy={it.dy} r={it.size / 2}
-          fill={it.filled ? INK : 'none'} stroke={it.filled ? 'none' : INK_DIM} strokeWidth={sw} />
+          fill={it.filled ? (it.color || INK) : 'none'} stroke={it.filled ? 'none' : INK_DIM} strokeWidth={sw} />
       ) : (
         <rect key={i} x={it.dx - it.size / 2} y={it.dy - it.size / 2} width={it.size} height={it.size}
-          fill={it.filled ? INK : 'none'} stroke={it.filled ? 'none' : INK_DIM} strokeWidth={sw} />
+          fill={it.filled ? (it.color || INK) : 'none'} stroke={it.filled ? 'none' : INK_DIM} strokeWidth={sw} />
       ))}
     </svg>
   )
