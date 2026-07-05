@@ -43,8 +43,140 @@ const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y)
 /* ---------- geometry ---------- */
 
 function elBBox(el) {
+  if (el.type === 'ink') {
+    let l = Infinity, r = -Infinity, t = Infinity, b = -Infinity
+    for (const [dx, dy] of el.points) {
+      const x = el.x + dx, y = el.y + dy
+      l = Math.min(l, x); r = Math.max(r, x)
+      t = Math.min(t, y); b = Math.max(b, y)
+    }
+    return { l, r, t, b, cx: (l + r) / 2, cy: (t + b) / 2, w: r - l, h2: b - t }
+  }
   const h = el.size / 2
   return { l: el.x - h, r: el.x + h, t: el.y - h, b: el.y + h, cx: el.x, cy: el.y, w: el.size, h2: el.size }
+}
+
+const inkPathD = (el) => el.points
+  .map(([dx, dy], i) => `${i ? 'L' : 'M'}${(el.x + dx).toFixed(2)} ${(el.y + dy).toFixed(2)}`)
+  .join('') + (el.closed ? 'Z' : '')
+
+/* ---------- freehand shape recognition ---------- */
+
+const pathLength = (pts) => {
+  let L = 0
+  for (let i = 1; i < pts.length; i++) L += dist(pts[i - 1], pts[i])
+  return L
+}
+
+function rdp(pts, eps) {
+  if (pts.length < 3) return pts.slice()
+  const a = pts[0], b = pts[pts.length - 1]
+  const dx = b.x - a.x, dy = b.y - a.y
+  const L = Math.hypot(dx, dy) || 1e-9
+  let maxD = 0, idx = 0
+  for (let i = 1; i < pts.length - 1; i++) {
+    const d = Math.abs(dy * (pts[i].x - a.x) - dx * (pts[i].y - a.y)) / L
+    if (d > maxD) { maxD = d; idx = i }
+  }
+  if (maxD > eps) {
+    const left = rdp(pts.slice(0, idx + 1), eps)
+    return left.slice(0, -1).concat(rdp(pts.slice(idx), eps))
+  }
+  return [a, b]
+}
+
+const inkFromAbs = (abs, closed) => {
+  let cx = 0, cy = 0
+  for (const p of abs) { cx += p.x; cy += p.y }
+  cx /= abs.length; cy /= abs.length
+  return { type: 'ink', x: cx, y: cy, points: abs.map(p => [p.x - cx, p.y - cy]), closed }
+}
+
+/*
+ Recognize a raw stroke (world coords). Returns:
+   {type:'circle', cx, cy, r}      → becomes a real circle element
+   {type:'square', cx, cy, size}   → becomes a real square element
+   {type:'ink', x, y, points, closed} → perfected line / triangle / rect / polygon
+   null → keep the raw stroke
+*/
+function recognize(pts) {
+  if (pts.length < 4) return null
+  const len = pathLength(pts)
+  if (len < 12) return null
+  const first = pts[0], last = pts[pts.length - 1]
+  const closed = dist(first, last) < Math.max(len * 0.2, 12)
+
+  if (!closed) {
+    // straight line?
+    const dx = last.x - first.x, dy = last.y - first.y
+    const L = Math.hypot(dx, dy) || 1e-9
+    let maxDev = 0
+    for (const p of pts) {
+      maxDev = Math.max(maxDev, Math.abs(dy * (p.x - first.x) - dx * (p.y - first.y)) / L)
+    }
+    if (maxDev < Math.max(L * 0.08, 5)) {
+      let ang = Math.atan2(dy, dx)
+      const deg = ang * 180 / Math.PI
+      for (const s of [0, 45, 90, 135, 180, -45, -90, -135, -180]) {
+        if (Math.abs(deg - s) < 8) { ang = s * Math.PI / 180; break }
+      }
+      const mx = (first.x + last.x) / 2, my = (first.y + last.y) / 2
+      const h = L / 2, ca = Math.cos(ang), sa = Math.sin(ang)
+      return inkFromAbs([{ x: mx - ca * h, y: my - sa * h }, { x: mx + ca * h, y: my + sa * h }], false)
+    }
+    return null // open scribble stays freehand
+  }
+
+  // closed: circle vs polygon
+  let cx = 0, cy = 0
+  for (const p of pts) { cx += p.x; cy += p.y }
+  cx /= pts.length; cy /= pts.length
+  const radii = pts.map(p => Math.hypot(p.x - cx, p.y - cy))
+  const rMean = radii.reduce((s, r) => s + r, 0) / radii.length
+  const dev = Math.sqrt(radii.reduce((s, r) => s + (r - rMean) ** 2, 0) / radii.length) / (rMean || 1e-9)
+
+  let poly = rdp(pts, Math.max(len * 0.025, 4))
+  if (poly.length > 2 && dist(poly[0], poly[poly.length - 1]) < len * 0.1) poly = poly.slice(0, -1)
+  // keep only real corners: drop vertices where the direction barely turns
+  if (poly.length > 3) {
+    const corners = poly.filter((p, i) => {
+      const prev = poly[(i - 1 + poly.length) % poly.length]
+      const next = poly[(i + 1) % poly.length]
+      const a1 = Math.atan2(p.y - prev.y, p.x - prev.x)
+      const a2 = Math.atan2(next.y - p.y, next.x - p.x)
+      let turn = Math.abs(a1 - a2)
+      if (turn > Math.PI) turn = 2 * Math.PI - turn
+      return turn > 20 * Math.PI / 180
+    })
+    if (corners.length >= 3) poly = corners
+  }
+  const n = poly.length
+
+  if (dev < 0.10 || (n >= 6 && dev < 0.22)) {
+    return { type: 'circle', cx, cy, r: rMean }
+  }
+
+  if (n === 4) {
+    // near-axis-aligned quad → rectangle (square element when proportions allow)
+    const axisAligned = poly.every((p, i) => {
+      const q = poly[(i + 1) % 4]
+      const a = Math.abs(Math.atan2(q.y - p.y, q.x - p.x) * 180 / Math.PI)
+      return Math.min(a, Math.abs(a - 90), Math.abs(a - 180)) < 15
+    })
+    if (axisAligned) {
+      let l = Infinity, r = -Infinity, t = Infinity, b = -Infinity
+      for (const p of poly) { l = Math.min(l, p.x); r = Math.max(r, p.x); t = Math.min(t, p.y); b = Math.max(b, p.y) }
+      const w = r - l, h = b - t
+      if (w / h > 0.8 && w / h < 1.25) {
+        return { type: 'square', cx: (l + r) / 2, cy: (t + b) / 2, size: (w + h) / 2 }
+      }
+      return inkFromAbs([{ x: l, y: t }, { x: r, y: t }, { x: r, y: b }, { x: l, y: b }], true)
+    }
+    return inkFromAbs(poly, true)
+  }
+
+  if (n >= 3 && n <= 8) return inkFromAbs(poly, true)
+  return null
 }
 
 function bboxOf(els) {
@@ -118,8 +250,9 @@ function computeSnap(movingEls, statics, th) {
     return best
   }
 
-  const spX = spacing(bb.cx, cyNow, s => s.x, s => s.y, s => s.size / 2)
-  const spY = spacing(bb.cy, cxNow, s => s.y, s => s.x, s => s.size / 2)
+  const halfMin = s => { const e = elBBox(s); return Math.min(e.r - e.l, e.b - e.t) / 2 }
+  const spX = spacing(bb.cx, cyNow, s => elBBox(s).cx, s => elBBox(s).cy, halfMin)
+  const spY = spacing(bb.cy, cxNow, s => elBBox(s).cy, s => elBBox(s).cx, halfMin)
 
   // choose per axis: spacing wins if at least as close (it is the rarer, more precious snap)
   let ax = 0, useSpX = false
@@ -291,6 +424,7 @@ export default function App() {
   const [activeColor, setActiveColor] = useState(PALETTE[0])
   const activeColorRef = useRef(activeColor); activeColorRef.current = activeColor
   const [marquee, setMarquee] = useState(null) // {x1,y1,x2,y2} world
+  const [drawing, setDrawing] = useState(null) // {pts:[{x,y}], color, preview} world
   const [guides, setGuides] = useState(null)
   const [ghost, setGhost] = useState(null) // {x,y,shape} or {x,y,asset} screen coords
   const [libOpen, setLibOpen] = useState(false)
@@ -342,7 +476,7 @@ export default function App() {
   /* ----- mutations ----- */
   const placeElement = useCallback((shape, wx, wy, withSnap = true) => {
     const p = pageRef.current
-    let el = { id: uid(), shape, x: wx, y: wy, size: DEFAULT_SIZE, filled: false, color: activeColorRef.current, groupId: null }
+    let el = { id: uid(), shape, x: wx, y: wy, size: DEFAULT_SIZE, filled: false, color: activeColorRef.current, strokeColor: activeColorRef.current, groupId: null }
     if (withSnap) {
       const th = SNAP_PX / viewRef.current.scale
       const { ax, ay } = computeSnap([el], p.elements, th)
@@ -358,6 +492,7 @@ export default function App() {
       ...pg,
       elements: pg.elements.map(e => {
         if (e.id !== id) return e
+        if (e.type === 'ink' && !e.closed) return { ...e, color: c } // open stroke: recolor
         if (!e.filled) return { ...e, filled: true, color: c }
         if ((e.color || INK) !== c) return { ...e, color: c }
         return { ...e, filled: false }
@@ -370,7 +505,11 @@ export default function App() {
     if (!ids.size) return
     commit(d => updatePage(d, pageIdRef.current, pg => ({
       ...pg,
-      elements: pg.elements.map(e => (ids.has(e.id) ? { ...e, filled: true, color: c } : e)),
+      elements: pg.elements.map(e => {
+        if (!ids.has(e.id)) return e
+        if (e.type === 'ink') return { ...e, color: c }
+        return { ...e, filled: true, color: c, strokeColor: c }
+      }),
     })))
   }, [commit])
 
@@ -445,7 +584,7 @@ export default function App() {
       const members = groupMembers(pg, gid)
       if (!members.length) return pg
       const bb = bboxOf(members)
-      const avg = members.reduce((s, m) => s + m.size, 0) / members.length
+      const avg = members.reduce((s, m) => s + (m.size || elBBox(m).b - elBBox(m).t), 0) / members.length
       const dy = bb.h + avg * 1.2
       const g2 = uid('g')
       const copies = members.map(m => ({ ...m, id: uid(), y: m.y + dy, groupId: g2 }))
@@ -462,7 +601,9 @@ export default function App() {
     const src = p.elements.filter(e => ids.has(e.id))
     const bb = bboxOf(src)
     const grouped = src.length > 1 && src.every(e => e.groupId && e.groupId === src[0].groupId)
-    const items = src.map(e => ({ shape: e.shape, dx: e.x - bb.cx, dy: e.y - bb.cy, size: e.size, filled: e.filled, color: e.color || INK }))
+    const items = src.map(e => e.type === 'ink'
+      ? { type: 'ink', dx: e.x - bb.cx, dy: e.y - bb.cy, points: e.points, closed: e.closed, filled: e.filled, color: e.color || INK }
+      : { shape: e.shape, dx: e.x - bb.cx, dy: e.y - bb.cy, size: e.size, filled: e.filled, color: e.color || INK, strokeColor: e.strokeColor || INK })
     const asset = { id: uid('a'), items, grouped, w: bb.w, h: bb.h }
     commit(d => ({ ...d, library: [...d.library, asset] }))
     setLibOpen(true)
@@ -475,9 +616,9 @@ export default function App() {
   const placeAsset = useCallback((asset, wx, wy) => {
     const p = pageRef.current
     const g = asset.grouped ? uid('g') : null
-    let els = asset.items.map(it => ({
-      id: uid(), shape: it.shape, x: wx + it.dx, y: wy + it.dy, size: it.size, filled: it.filled, color: it.color || INK, groupId: g,
-    }))
+    let els = asset.items.map(it => it.type === 'ink'
+      ? { id: uid(), type: 'ink', x: wx + it.dx, y: wy + it.dy, points: it.points, closed: it.closed, filled: it.filled, color: it.color || INK, groupId: g }
+      : { id: uid(), shape: it.shape, x: wx + it.dx, y: wy + it.dy, size: it.size, filled: it.filled, color: it.color || INK, strokeColor: it.strokeColor || INK, groupId: g })
     const th = SNAP_PX / viewRef.current.scale
     const { ax, ay } = computeSnap(els, p.elements, th)
     els = els.map(e => ({ ...e, x: e.x + ax, y: e.y + ay }))
@@ -504,6 +645,8 @@ export default function App() {
       world0: { x: (c.x - v.tx) / v.scale, y: (c.y - v.ty) / v.scale },
     }
     setGuides(null)
+    setDrawing(null)
+    setMarquee(null)
     return true
   }
 
@@ -557,6 +700,12 @@ export default function App() {
       gesture.current = { type: 'marquee', start: pt, world0: toWorld(pt.x, pt.y), moved: false }
       return
     }
+    if (toolRef.current === 'draw' && !forcePan) {
+      const w = toWorld(pt.x, pt.y)
+      gesture.current = { type: 'draw', pts: [w], lastScreen: pt, snapped: null, holdTimer: null }
+      setDrawing({ pts: [w], color: activeColorRef.current, preview: null })
+      return
+    }
     gesture.current = { type: 'canvas', start: pt, view0: viewRef.current, moved: false, forcePan }
   }
 
@@ -587,6 +736,23 @@ export default function App() {
       const dx = pt.x - g.start.x, dy = pt.y - g.start.y
       if (!g.moved && Math.hypot(dx, dy) > TAP_PX) g.moved = true
       if (g.moved) setView({ ...g.view0, tx: g.view0.tx + dx, ty: g.view0.ty + dy })
+      return
+    }
+
+    if (g.type === 'draw') {
+      if (dist(pt, g.lastScreen) < 1.5) return
+      g.lastScreen = pt
+      g.pts.push(toWorld(pt.x, pt.y))
+      if (g.snapped) g.snapped = null // kept moving — cancel the snap
+      if (g.holdTimer) clearTimeout(g.holdTimer)
+      g.holdTimer = setTimeout(() => {
+        const rec = recognize(g.pts)
+        if (rec && gesture.current === g) {
+          g.snapped = rec
+          setDrawing(d => (d ? { ...d, preview: rec } : d))
+        }
+      }, 500)
+      setDrawing(d => (d ? { ...d, pts: g.pts.slice(), preview: null } : d))
       return
     }
 
@@ -691,6 +857,32 @@ export default function App() {
 
     if (g.type === 'resize') {
       if (docRef.current !== g.docBefore) pushHistory(g.docBefore)
+      return
+    }
+
+    if (g.type === 'draw') {
+      if (g.holdTimer) clearTimeout(g.holdTimer)
+      setDrawing(null)
+      const color = activeColorRef.current
+      const rec = g.snapped
+      const finish = (el) => commit(d => updatePage(d, pageIdRef.current, pg => ({
+        ...pg, elements: [...pg.elements, el],
+      })))
+      if (rec) {
+        if (rec.type === 'circle') {
+          finish({ id: uid(), shape: 'circle', x: rec.cx, y: rec.cy, size: rec.r * 2, filled: false, color, strokeColor: color, groupId: null })
+        } else if (rec.type === 'square') {
+          finish({ id: uid(), shape: 'square', x: rec.cx, y: rec.cy, size: rec.size, filled: false, color, strokeColor: color, groupId: null })
+        } else {
+          finish({ id: uid(), ...rec, filled: false, color, groupId: null })
+        }
+      } else if (g.pts.length > 2 && pathLength(g.pts) > 10) {
+        // keep the freehand stroke, lightly simplified
+        const eps = Math.max(0.8, 1.2 / viewRef.current.scale)
+        const smooth = rdp(g.pts, eps)
+        const ink = inkFromAbs(smooth, false)
+        finish({ id: uid(), ...ink, filled: false, color, groupId: null })
+      }
       return
     }
 
@@ -837,7 +1029,7 @@ export default function App() {
   const selBB = bboxOf(selEls)
   const singleGroupId = selEls.length > 1 && selEls.every(e => e.groupId && e.groupId === selEls[0].groupId)
     ? selEls[0].groupId : null
-  const singleFree = selEls.length === 1 && !selEls[0].groupId ? selEls[0] : null
+  const singleFree = selEls.length === 1 && !selEls[0].groupId && selEls[0].type !== 'ink' ? selEls[0] : null
   const anyGrouped = selEls.some(e => e.groupId)
 
   /* group hairline frames for selected groups */
@@ -871,7 +1063,31 @@ export default function App() {
           {/* elements */}
           {page.elements.map(el => {
             const selected = sel.has(el.id)
+            if (el.type === 'ink') {
+              const d = inkPathD(el)
+              const bb = elBBox(el)
+              return (
+                <g key={el.id} onPointerDown={(e) => beginElementGesture(el.id, e)} style={{ cursor: 'pointer' }}>
+                  <path d={d}
+                    fill={el.closed ? 'transparent' : 'none'}
+                    stroke="transparent" strokeWidth={Math.max(16 / view.scale, 10)}
+                    pointerEvents={el.closed ? 'all' : 'stroke'} />
+                  <path d={d}
+                    fill={el.closed && el.filled ? (el.color || INK) : 'none'}
+                    stroke={el.color || INK} strokeWidth={2}
+                    strokeLinejoin="round" strokeLinecap="round"
+                    pointerEvents="none" />
+                  {selected && (
+                    <rect x={bb.l - 5 / view.scale} y={bb.t - 5 / view.scale}
+                      width={bb.r - bb.l + 10 / view.scale} height={bb.b - bb.t + 10 / view.scale}
+                      fill="none" stroke={ACCENT} strokeWidth={hair} pointerEvents="none" />
+                  )}
+                </g>
+              )
+            }
             const hitR = Math.max(el.size / 2, 20 / view.scale)
+            const outline = el.strokeColor && el.strokeColor !== INK ? el.strokeColor : INK_DIM
+            const outlineOp = el.strokeColor && el.strokeColor !== INK ? 0.75 : 1
             return (
               <g key={el.id} onPointerDown={(e) => beginElementGesture(el.id, e)} style={{ cursor: 'pointer' }}>
                 {el.shape === 'circle' ? (
@@ -880,7 +1096,8 @@ export default function App() {
                     <circle
                       cx={el.x} cy={el.y} r={el.size / 2}
                       fill={el.filled ? (el.color || INK) : 'transparent'}
-                      stroke={el.filled ? 'none' : INK_DIM}
+                      stroke={el.filled ? 'none' : outline}
+                      strokeOpacity={el.filled ? 1 : outlineOp}
                       strokeWidth={hair}
                     />
                     {selected && <circle cx={el.x} cy={el.y} r={el.size / 2 + 4 / view.scale} fill="none" stroke={ACCENT} strokeWidth={hair} />}
@@ -891,7 +1108,8 @@ export default function App() {
                     <rect
                       x={el.x - el.size / 2} y={el.y - el.size / 2} width={el.size} height={el.size}
                       fill={el.filled ? (el.color || INK) : 'transparent'}
-                      stroke={el.filled ? 'none' : INK_DIM}
+                      stroke={el.filled ? 'none' : outline}
+                      strokeOpacity={el.filled ? 1 : outlineOp}
                       strokeWidth={hair}
                     />
                     {selected && (
@@ -944,6 +1162,22 @@ export default function App() {
               ))}
             </g>
           )}
+
+          {/* live freehand drawing */}
+          {drawing && (() => {
+            const p = drawing.preview
+            if (p) {
+              if (p.type === 'circle') {
+                return <circle cx={p.cx} cy={p.cy} r={p.r} fill="none" stroke={drawing.color} strokeWidth={2} pointerEvents="none" />
+              }
+              if (p.type === 'square') {
+                return <rect x={p.cx - p.size / 2} y={p.cy - p.size / 2} width={p.size} height={p.size} fill="none" stroke={drawing.color} strokeWidth={2} pointerEvents="none" />
+              }
+              return <path d={inkPathD(p)} fill="none" stroke={drawing.color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" pointerEvents="none" />
+            }
+            const d = drawing.pts.map((q, i) => `${i ? 'L' : 'M'}${q.x.toFixed(2)} ${q.y.toFixed(2)}`).join('')
+            return <path d={d} fill="none" stroke={drawing.color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" pointerEvents="none" />
+          })()}
 
           {/* marquee selection rectangle */}
           {marquee && (
@@ -1055,6 +1289,12 @@ export default function App() {
         <ToolBtn active={tool === 'square'} onPointerDown={beginToolDrag('square')}>
           <svg width="18" height="18" viewBox="0 0 18 18">
             <rect x="2.5" y="2.5" width="13" height="13" fill="none" stroke={tool === 'square' ? ACCENT : INK} strokeWidth="1" />
+          </svg>
+        </ToolBtn>
+        <ToolBtn active={tool === 'draw'} onPointerDown={(e) => e.stopPropagation()} onClick={() => setTool(t => (t === 'draw' ? null : 'draw'))}>
+          <svg width="18" height="18" viewBox="0 0 18 18">
+            <path d="M2.5 13.5 C 5 4.5, 9 15, 15.5 4" fill="none"
+              stroke={tool === 'draw' ? ACCENT : INK} strokeWidth="1" strokeLinecap="round" />
           </svg>
         </ToolBtn>
         <div style={{ width: 1, background: INK }} />
@@ -1264,7 +1504,12 @@ function AssetThumb({ asset }) {
   const sw = Math.max(w, h) / 40
   return (
     <svg width="100%" height="100%" viewBox={vb} preserveAspectRatio="xMidYMid meet" style={{ pointerEvents: 'none' }}>
-      {asset.items.map((it, i) => it.shape === 'circle' ? (
+      {asset.items.map((it, i) => it.type === 'ink' ? (
+        <path key={i}
+          d={it.points.map(([dx, dy], j) => `${j ? 'L' : 'M'}${it.dx + dx} ${it.dy + dy}`).join('') + (it.closed ? 'Z' : '')}
+          fill={it.closed && it.filled ? (it.color || INK) : 'none'}
+          stroke={it.color || INK} strokeWidth={sw * 2} strokeLinejoin="round" strokeLinecap="round" />
+      ) : it.shape === 'circle' ? (
         <circle key={i} cx={it.dx} cy={it.dy} r={it.size / 2}
           fill={it.filled ? (it.color || INK) : 'none'} stroke={it.filled ? 'none' : INK_DIM} strokeWidth={sw} />
       ) : (
