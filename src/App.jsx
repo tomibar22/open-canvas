@@ -594,6 +594,109 @@ export default function App() {
     if (newIds) setSel(new Set(newIds))
   }, [commit])
 
+  /* Quantize — like Ableton: snap what's on the canvas to its most sensible
+     structure. Selection if there is one, otherwise the whole page.
+     Groups move as single units. Passes: row y-align → column x-align →
+     equal spacing in rows → equal spacing in columns → equalize similar sizes. */
+  const quantize = useCallback(() => {
+    commit(d => updatePage(d, pageIdRef.current, pg => {
+      const selIds = selRef.current
+      const pool = pg.elements.filter(e => !selIds.size || selIds.has(e.id))
+      if (pool.length < 2) return pg
+
+      const byUnit = new Map()
+      for (const el of pool) {
+        const key = el.groupId ? 'g:' + el.groupId : el.id
+        if (!byUnit.has(key)) byUnit.set(key, [])
+        byUnit.get(key).push(el)
+      }
+      const units = [...byUnit.values()].map(els => {
+        const bb = bboxOf(els)
+        return { els, cx: bb.cx, cy: bb.cy, w: bb.w, h: bb.h }
+      })
+
+      const clusterBy = (getV, getDim) => {
+        const sorted = [...units].sort((a, b) => getV(a) - getV(b))
+        const clusters = []
+        let cur = [sorted[0]]
+        for (let i = 1; i < sorted.length; i++) {
+          const tol = Math.max(0.5 * Math.min(getDim(sorted[i - 1]), getDim(sorted[i])), 12)
+          if (getV(sorted[i]) - getV(sorted[i - 1]) <= tol) cur.push(sorted[i])
+          else { clusters.push(cur); cur = [sorted[i]] }
+        }
+        clusters.push(cur)
+        return clusters
+      }
+
+      // 1) rows: align centers-y
+      for (const cl of clusterBy(u => u.cy, u => u.h)) {
+        if (cl.length < 2) continue
+        const m = cl.reduce((s, u) => s + u.cy, 0) / cl.length
+        cl.forEach(u => { u.cy = m })
+      }
+      // 2) columns: align centers-x
+      for (const cl of clusterBy(u => u.cx, u => u.w)) {
+        if (cl.length < 2) continue
+        const m = cl.reduce((s, u) => s + u.cx, 0) / cl.length
+        cl.forEach(u => { u.cx = m })
+      }
+      // 3) equal spacing along rows
+      for (const cl of clusterBy(u => u.cy, u => u.h)) {
+        if (cl.length < 3) continue
+        const s = [...cl].sort((a, b) => a.cx - b.cx)
+        const a = s[0].cx, b = s[s.length - 1].cx
+        s.forEach((u, i) => { u.cx = a + (b - a) * i / (s.length - 1) })
+      }
+      // 4) equal spacing along columns
+      for (const cl of clusterBy(u => u.cx, u => u.w)) {
+        if (cl.length < 3) continue
+        const s = [...cl].sort((a, b) => a.cy - b.cy)
+        const a = s[0].cy, b = s[s.length - 1].cy
+        s.forEach((u, i) => { u.cy = a + (b - a) * i / (s.length - 1) })
+      }
+      // 5) equalize similar sizes (free shape elements only)
+      const newSizes = new Map()
+      const shapes = pool.filter(e => e.size && !e.groupId).sort((a, b) => a.size - b.size)
+      let run = []
+      const flush = () => {
+        if (run.length >= 2) {
+          const m = run.reduce((s, e) => s + e.size, 0) / run.length
+          run.forEach(e => newSizes.set(e.id, m))
+        }
+        run = []
+      }
+      for (const e of shapes) {
+        if (run.length && e.size / run[run.length - 1].size > 1.22) flush()
+        run.push(e)
+      }
+      flush()
+
+      // apply unit deltas
+      const delta = new Map()
+      for (const u of units) {
+        const bb = bboxOf(u.els)
+        const ddx = u.cx - bb.cx, ddy = u.cy - bb.cy
+        if (Math.abs(ddx) < 0.01 && Math.abs(ddy) < 0.01) continue
+        u.els.forEach(el => delta.set(el.id, [ddx, ddy]))
+      }
+      if (!delta.size && !newSizes.size) return pg
+      return {
+        ...pg,
+        elements: pg.elements.map(e => {
+          const dl = delta.get(e.id)
+          const ns = newSizes.get(e.id)
+          if (!dl && ns == null) return e
+          return {
+            ...e,
+            x: e.x + (dl ? dl[0] : 0),
+            y: e.y + (dl ? dl[1] : 0),
+            ...(ns != null && Math.abs(ns - e.size) > 0.01 ? { size: ns } : {}),
+          }
+        }),
+      }
+    }))
+  }, [commit])
+
   const saveAsset = useCallback(() => {
     const ids = selRef.current
     if (!ids.size) return
@@ -993,12 +1096,13 @@ export default function App() {
       if (mod && e.key.toLowerCase() === 'g') { e.preventDefault(); groupSelection(); return }
       if (e.key === 'Delete' || e.key === 'Backspace') { if (selRef.current.size) { e.preventDefault(); deleteSelection() } return }
       if (e.key === 'Escape') { setSel(new Set()); setSelectMode(false); setTool(null) }
+      if (!mod && e.key.toLowerCase() === 'q') { quantize() }
     }
     const up = (e) => { if (e.code === 'Space') spaceDown.current = false }
     window.addEventListener('keydown', down)
     window.addEventListener('keyup', up)
     return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up) }
-  }, [undo, redo, duplicateSelection, groupSelection, deleteSelection])
+  }, [undo, redo, duplicateSelection, groupSelection, deleteSelection, quantize])
 
   /* prune selection when elements vanish (undo etc.) */
   useEffect(() => {
@@ -1239,6 +1343,7 @@ export default function App() {
           ) : (
             <>
               <BarBtn label="DUPLICATE" onClick={duplicateSelection} />
+              {sel.size > 1 && <BarBtn label="QUANTIZE" onClick={quantize} />}
               {sel.size > 1 && !anyGrouped && <BarBtn label="GROUP" onClick={groupSelection} />}
               {anyGrouped && <BarBtn label="UNGROUP" onClick={ungroupSelection} />}
             </>
@@ -1297,6 +1402,13 @@ export default function App() {
               stroke={tool === 'draw' ? ACCENT : INK} strokeWidth="1" strokeLinecap="round" />
           </svg>
         </ToolBtn>
+        <div style={{ width: 1, background: INK }} />
+        <button
+          style={barBtnStyle}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={quantize}
+          title="Quantize — auto-align everything (Q)"
+        >QUANTIZE</button>
         <div style={{ width: 1, background: INK }} />
         <ToolBtn onPointerDown={(e) => { e.stopPropagation() }} onClick={undo}>
           <span style={{ fontSize: 14, color: INK }}>↺</span>
