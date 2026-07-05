@@ -423,6 +423,8 @@ export default function App() {
   const toolRef = useRef(tool); toolRef.current = tool
   const [activeColor, setActiveColor] = useState(PALETTE[0])
   const activeColorRef = useRef(activeColor); activeColorRef.current = activeColor
+  const [penWidth, setPenWidth] = useState(2.5) // world units: 1.25 fine / 2.5 regular / 5 bold
+  const penWidthRef = useRef(penWidth); penWidthRef.current = penWidth
   const [marquee, setMarquee] = useState(null) // {x1,y1,x2,y2} world
   const [drawing, setDrawing] = useState(null) // {pts:[{x,y}], color, preview} world
   const [guides, setGuides] = useState(null)
@@ -594,6 +596,40 @@ export default function App() {
     if (newIds) setSel(new Set(newIds))
   }, [commit])
 
+  /* scale the whole selection around its collective center */
+  const scaleSelection = useCallback((f) => {
+    const ids = selRef.current
+    if (!ids.size) return
+    const els = pageRef.current.elements.filter(e => ids.has(e.id))
+    const bb = bboxOf(els)
+    commit(d => updatePage(d, pageIdRef.current, pg => ({
+      ...pg,
+      elements: pg.elements.map(e => {
+        if (!ids.has(e.id)) return e
+        const x = bb.cx + (e.x - bb.cx) * f
+        const y = bb.cy + (e.y - bb.cy) * f
+        if (e.type === 'ink') {
+          return { ...e, x, y, points: e.points.map(([dx, dy]) => [dx * f, dy * f]) }
+        }
+        return { ...e, x, y, size: clamp(e.size * f, 8, 1600) }
+      }),
+    })))
+  }, [commit])
+
+  /* set stroke weight on selected ink strokes / element outlines */
+  const setSelWeight = useCallback((w) => {
+    const ids = selRef.current
+    if (!ids.size) return
+    commit(d => updatePage(d, pageIdRef.current, pg => ({
+      ...pg,
+      elements: pg.elements.map(e => {
+        if (!ids.has(e.id)) return e
+        if (e.type === 'ink') return { ...e, width: w }
+        return { ...e, weight: w }
+      }),
+    })))
+  }, [commit])
+
   /* Quantize — like Ableton: snap what's on the canvas to its most sensible
      structure. Selection if there is one, otherwise the whole page.
      Groups move as single units. Passes: row y-align → column x-align →
@@ -705,8 +741,8 @@ export default function App() {
     const bb = bboxOf(src)
     const grouped = src.length > 1 && src.every(e => e.groupId && e.groupId === src[0].groupId)
     const items = src.map(e => e.type === 'ink'
-      ? { type: 'ink', dx: e.x - bb.cx, dy: e.y - bb.cy, points: e.points, closed: e.closed, filled: e.filled, color: e.color || INK }
-      : { shape: e.shape, dx: e.x - bb.cx, dy: e.y - bb.cy, size: e.size, filled: e.filled, color: e.color || INK, strokeColor: e.strokeColor || INK })
+      ? { type: 'ink', dx: e.x - bb.cx, dy: e.y - bb.cy, points: e.points, closed: e.closed, filled: e.filled, color: e.color || INK, width: e.width }
+      : { shape: e.shape, dx: e.x - bb.cx, dy: e.y - bb.cy, size: e.size, filled: e.filled, color: e.color || INK, strokeColor: e.strokeColor || INK, weight: e.weight })
     const asset = { id: uid('a'), items, grouped, w: bb.w, h: bb.h }
     commit(d => ({ ...d, library: [...d.library, asset] }))
     setLibOpen(true)
@@ -720,8 +756,8 @@ export default function App() {
     const p = pageRef.current
     const g = asset.grouped ? uid('g') : null
     let els = asset.items.map(it => it.type === 'ink'
-      ? { id: uid(), type: 'ink', x: wx + it.dx, y: wy + it.dy, points: it.points, closed: it.closed, filled: it.filled, color: it.color || INK, groupId: g }
-      : { id: uid(), shape: it.shape, x: wx + it.dx, y: wy + it.dy, size: it.size, filled: it.filled, color: it.color || INK, strokeColor: it.strokeColor || INK, groupId: g })
+      ? { id: uid(), type: 'ink', x: wx + it.dx, y: wy + it.dy, points: it.points, closed: it.closed, filled: it.filled, color: it.color || INK, width: it.width, groupId: g }
+      : { id: uid(), shape: it.shape, x: wx + it.dx, y: wy + it.dy, size: it.size, filled: it.filled, color: it.color || INK, strokeColor: it.strokeColor || INK, weight: it.weight, groupId: g })
     const th = SNAP_PX / viewRef.current.scale
     const { ax, ay } = computeSnap(els, p.elements, th)
     els = els.map(e => ({ ...e, x: e.x + ax, y: e.y + ay }))
@@ -971,20 +1007,21 @@ export default function App() {
       const finish = (el) => commit(d => updatePage(d, pageIdRef.current, pg => ({
         ...pg, elements: [...pg.elements, el],
       })))
+      const w = penWidthRef.current
       if (rec) {
         if (rec.type === 'circle') {
-          finish({ id: uid(), shape: 'circle', x: rec.cx, y: rec.cy, size: rec.r * 2, filled: false, color, strokeColor: color, groupId: null })
+          finish({ id: uid(), shape: 'circle', x: rec.cx, y: rec.cy, size: rec.r * 2, filled: false, color, strokeColor: color, weight: w, groupId: null })
         } else if (rec.type === 'square') {
-          finish({ id: uid(), shape: 'square', x: rec.cx, y: rec.cy, size: rec.size, filled: false, color, strokeColor: color, groupId: null })
+          finish({ id: uid(), shape: 'square', x: rec.cx, y: rec.cy, size: rec.size, filled: false, color, strokeColor: color, weight: w, groupId: null })
         } else {
-          finish({ id: uid(), ...rec, filled: false, color, groupId: null })
+          finish({ id: uid(), ...rec, filled: false, color, width: w, groupId: null })
         }
       } else if (g.pts.length > 2 && pathLength(g.pts) > 10) {
         // keep the freehand stroke, lightly simplified
         const eps = Math.max(0.8, 1.2 / viewRef.current.scale)
         const smooth = rdp(g.pts, eps)
         const ink = inkFromAbs(smooth, false)
-        finish({ id: uid(), ...ink, filled: false, color, groupId: null })
+        finish({ id: uid(), ...ink, filled: false, color, width: w, groupId: null })
       }
       return
     }
@@ -1178,7 +1215,7 @@ export default function App() {
                     pointerEvents={el.closed ? 'all' : 'stroke'} />
                   <path d={d}
                     fill={el.closed && el.filled ? (el.color || INK) : 'none'}
-                    stroke={el.color || INK} strokeWidth={2}
+                    stroke={el.color || INK} strokeWidth={el.width || 2}
                     strokeLinejoin="round" strokeLinecap="round"
                     pointerEvents="none" />
                   {selected && (
@@ -1190,8 +1227,10 @@ export default function App() {
               )
             }
             const hitR = Math.max(el.size / 2, 20 / view.scale)
-            const outline = el.strokeColor && el.strokeColor !== INK ? el.strokeColor : INK_DIM
-            const outlineOp = el.strokeColor && el.strokeColor !== INK ? 0.75 : 1
+            const colored = el.strokeColor && el.strokeColor !== INK
+            const outline = colored ? el.strokeColor : (el.weight ? INK : INK_DIM)
+            const outlineOp = colored ? 0.75 : 1
+            const outlineW = el.weight || hair
             return (
               <g key={el.id} onPointerDown={(e) => beginElementGesture(el.id, e)} style={{ cursor: 'pointer' }}>
                 {el.shape === 'circle' ? (
@@ -1202,7 +1241,7 @@ export default function App() {
                       fill={el.filled ? (el.color || INK) : 'transparent'}
                       stroke={el.filled ? 'none' : outline}
                       strokeOpacity={el.filled ? 1 : outlineOp}
-                      strokeWidth={hair}
+                      strokeWidth={outlineW}
                     />
                     {selected && <circle cx={el.x} cy={el.y} r={el.size / 2 + 4 / view.scale} fill="none" stroke={ACCENT} strokeWidth={hair} />}
                   </>
@@ -1214,7 +1253,7 @@ export default function App() {
                       fill={el.filled ? (el.color || INK) : 'transparent'}
                       stroke={el.filled ? 'none' : outline}
                       strokeOpacity={el.filled ? 1 : outlineOp}
-                      strokeWidth={hair}
+                      strokeWidth={outlineW}
                     />
                     {selected && (
                       <rect
@@ -1270,17 +1309,18 @@ export default function App() {
           {/* live freehand drawing */}
           {drawing && (() => {
             const p = drawing.preview
+            const w = penWidth
             if (p) {
               if (p.type === 'circle') {
-                return <circle cx={p.cx} cy={p.cy} r={p.r} fill="none" stroke={drawing.color} strokeWidth={2} pointerEvents="none" />
+                return <circle cx={p.cx} cy={p.cy} r={p.r} fill="none" stroke={drawing.color} strokeWidth={w} pointerEvents="none" />
               }
               if (p.type === 'square') {
-                return <rect x={p.cx - p.size / 2} y={p.cy - p.size / 2} width={p.size} height={p.size} fill="none" stroke={drawing.color} strokeWidth={2} pointerEvents="none" />
+                return <rect x={p.cx - p.size / 2} y={p.cy - p.size / 2} width={p.size} height={p.size} fill="none" stroke={drawing.color} strokeWidth={w} pointerEvents="none" />
               }
-              return <path d={inkPathD(p)} fill="none" stroke={drawing.color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" pointerEvents="none" />
+              return <path d={inkPathD(p)} fill="none" stroke={drawing.color} strokeWidth={w} strokeLinejoin="round" strokeLinecap="round" pointerEvents="none" />
             }
             const d = drawing.pts.map((q, i) => `${i ? 'L' : 'M'}${q.x.toFixed(2)} ${q.y.toFixed(2)}`).join('')
-            return <path d={d} fill="none" stroke={drawing.color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" pointerEvents="none" />
+            return <path d={d} fill="none" stroke={drawing.color} strokeWidth={w} strokeLinejoin="round" strokeLinecap="round" pointerEvents="none" />
           })()}
 
           {/* marquee selection rectangle */}
@@ -1348,6 +1388,30 @@ export default function App() {
               {anyGrouped && <BarBtn label="UNGROUP" onClick={ungroupSelection} />}
             </>
           )}
+          <BarBtn label="−" wide={false} onClick={() => scaleSelection(1 / 1.2)} />
+          <div style={{ ...barBtnStyle, cursor: 'default', padding: '9px 2px', opacity: 0.55 }}>SIZE</div>
+          <BarBtn label="+" wide={false} onClick={() => scaleSelection(1.2)} />
+          {selEls.some(e => e.type === 'ink' || !e.filled) && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 8px' }}>
+              {[1.25, 2.5, 5].map(w => (
+                <button
+                  key={w}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={() => setSelWeight(w)}
+                  title={`Stroke ${w}`}
+                  style={{
+                    width: 20, height: 14, padding: 0, cursor: 'pointer', background: 'transparent',
+                    border: '1px solid rgba(26,26,26,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  }}
+                >
+                  <svg width="14" height="8">
+                    <line x1="1" y1="4" x2="13" y2="4" stroke={INK}
+                      strokeWidth={w === 1.25 ? 1 : w === 2.5 ? 2.5 : 4.5} strokeLinecap="round" />
+                  </svg>
+                </button>
+              ))}
+            </div>
+          )}
           <BarBtn label="SAVE" onClick={saveAsset} />
           <BarBtn label="DELETE" accent onClick={deleteSelection} />
         </div>
@@ -1358,8 +1422,8 @@ export default function App() {
         position: 'absolute', bottom: 20, left: '50%', transform: 'translateX(-50%)',
         display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
       }}>
-        {/* muted fill palette */}
-        <div style={{ display: 'flex', gap: 8, padding: '4px 2px' }}>
+        {/* muted fill palette + pen weight (weight only while drawing) */}
+        <div style={{ display: 'flex', gap: 8, padding: '4px 2px', alignItems: 'center' }}>
           {PALETTE.map(c => (
             <button
               key={c}
@@ -1375,6 +1439,30 @@ export default function App() {
               }}
             />
           ))}
+          {tool === 'draw' && (
+            <>
+              <div style={{ width: 1, height: 16, background: 'rgba(26,26,26,0.2)', margin: '0 4px' }} />
+              {[1.25, 2.5, 5].map(w => (
+                <button
+                  key={w}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={() => setPenWidth(w)}
+                  title={`Pen ${w}`}
+                  style={{
+                    width: 22, height: 16, padding: 0, cursor: 'pointer', background: 'transparent',
+                    border: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    outline: penWidth === w ? `1px solid ${ACCENT}` : '1px solid rgba(26,26,26,0.15)',
+                    outlineOffset: 2,
+                  }}
+                >
+                  <svg width="18" height="10">
+                    <line x1="2" y1="5" x2="16" y2="5" stroke={INK}
+                      strokeWidth={w === 1.25 ? 1 : w === 2.5 ? 2.5 : 4.5} strokeLinecap="round" />
+                  </svg>
+                </button>
+              ))}
+            </>
+          )}
         </div>
         <div style={{
           display: 'flex', gap: 1, border: `1px solid ${INK}`, background: PAPER,
