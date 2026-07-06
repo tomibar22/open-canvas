@@ -17,9 +17,9 @@ const INK_DIM = 'rgba(26,26,26,0.30)'
 const ACCENT = '#E34234'
 const ACCENT_60 = 'rgba(227,66,52,0.60)'
 
-/* muted, faded fill palette — ink first (default) */
+/* muted, faded fill palette — soft charcoal first (default) */
 const PALETTE = [
-  '#1A1A1A', // ink
+  '#4A4741', // warm charcoal — softer than pure ink
   '#B0685C', // dusty terracotta
   '#B89B5E', // faded ochre
   '#7F9183', // sage
