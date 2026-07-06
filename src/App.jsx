@@ -1096,13 +1096,13 @@ export default function App() {
         </div>
       )}
 
-      {/* ---- toolbar (bottom center) ---- */}
+      {/* ---- left-edge dock: palette + tools, thumb-reachable ---- */}
       <div style={{
-        position: 'absolute', bottom: 20, left: '50%', transform: 'translateX(-50%)',
-        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
+        position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)',
+        display: 'flex', gap: 12, alignItems: 'center',
       }}>
-        {/* muted fill palette + pen weight (weight only while drawing) */}
-        <div style={{ display: 'flex', gap: 14, padding: '6px 4px', alignItems: 'center' }}>
+        {/* palette column (outermost — easiest thumb reach) */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: '6px 4px', alignItems: 'center' }}>
           {PALETTE.map(c => (
             <button
               key={c}
@@ -1120,7 +1120,7 @@ export default function App() {
           ))}
           {tool === 'draw' && (
             <>
-              <div style={{ width: 1, height: 24, background: 'rgba(26,26,26,0.2)', margin: '0 4px' }} />
+              <div style={{ height: 1, width: 26, background: 'rgba(26,26,26,0.2)', margin: '2px 0' }} />
               {[1.25, 2.5, 5].map(w => (
                 <button
                   key={w}
@@ -1143,8 +1143,9 @@ export default function App() {
             </>
           )}
         </div>
+        {/* tools column */}
         <div style={{
-          display: 'flex', gap: 1, border: `1px solid ${INK}`, background: PAPER,
+          display: 'flex', flexDirection: 'column', gap: 1, border: `1px solid ${INK}`, background: PAPER,
           touchAction: 'none',
         }}>
         <ToolBtn active={tool === 'select'} onPointerDown={(e) => e.stopPropagation()} onClick={() => setTool(t => (t === 'select' ? null : 'select'))}>
@@ -1169,14 +1170,16 @@ export default function App() {
               stroke={tool === 'draw' ? ACCENT : INK} strokeWidth="1" strokeLinecap="round" />
           </svg>
         </ToolBtn>
-        <div style={{ width: 1, background: INK }} />
-        <button
-          style={barBtnStyle}
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={quantize}
-          title="Quantize — auto-align everything (Q)"
-        >QUANTIZE</button>
-        <div style={{ width: 1, background: INK }} />
+        <div style={{ height: 1, background: INK }} />
+        <ToolBtn onPointerDown={(e) => { e.stopPropagation() }} onClick={quantize} title="Quantize — auto-align everything (Q)">
+          <svg width="24" height="24" viewBox="0 0 18 18">
+            <line x1="2" y1="9" x2="16" y2="9" stroke={INK} strokeWidth="0.75" strokeDasharray="1.5 1.5" />
+            <circle cx="4.5" cy="9" r="2" fill={INK} />
+            <circle cx="9" cy="9" r="2" fill="none" stroke={INK} strokeWidth="1" />
+            <circle cx="13.5" cy="9" r="2" fill={INK} />
+          </svg>
+        </ToolBtn>
+        <div style={{ height: 1, background: INK }} />
         <ToolBtn onPointerDown={(e) => { e.stopPropagation() }} onClick={undo}>
           <span style={{ fontSize: 20, color: INK }}>↺</span>
         </ToolBtn>
