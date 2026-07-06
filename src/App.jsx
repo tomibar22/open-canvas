@@ -39,6 +39,13 @@ const HISTORY_MAX = 50
 let _uid = 1
 const uid = (p = 'e') => p + (_uid++).toString(36) + Date.now().toString(36).slice(-4)
 
+/* equilateral triangle (pointing up) inscribed in the element's size circle */
+const triPoints = (x, y, size) => [-90, 30, 150]
+  .map(a => { const r = size / 2, q = a * Math.PI / 180; return `${x + r * Math.cos(q)},${y + r * Math.sin(q)}` })
+  .join(' ')
+
+const rotXf = (el) => (el.rotation ? `rotate(${el.rotation} ${el.x} ${el.y})` : undefined)
+
 /* ---------- document helpers ---------- */
 
 const newPage = (name) => ({ id: uid('p'), name, elements: [] })
@@ -392,8 +399,8 @@ export default function App() {
     const bb = bboxOf(src)
     const grouped = src.length > 1 && src.every(e => e.groupId && e.groupId === src[0].groupId)
     const items = src.map(e => e.type === 'ink'
-      ? { type: 'ink', dx: e.x - bb.cx, dy: e.y - bb.cy, points: e.points, closed: e.closed, filled: e.filled, color: e.color || INK, width: e.width }
-      : { shape: e.shape, dx: e.x - bb.cx, dy: e.y - bb.cy, size: e.size, filled: e.filled, color: e.color || INK, strokeColor: e.strokeColor || INK, weight: e.weight })
+      ? { type: 'ink', dx: e.x - bb.cx, dy: e.y - bb.cy, points: e.points, closed: e.closed, filled: e.filled, color: e.color || INK, width: e.width, rotation: e.rotation }
+      : { shape: e.shape, dx: e.x - bb.cx, dy: e.y - bb.cy, size: e.size, filled: e.filled, color: e.color || INK, strokeColor: e.strokeColor || INK, weight: e.weight, rotation: e.rotation })
     const asset = { id: uid('a'), items, grouped, w: bb.w, h: bb.h }
     commit(d => ({ ...d, library: [...d.library, asset] }))
     setLibOpen(true)
@@ -407,8 +414,8 @@ export default function App() {
     const p = pageRef.current
     const g = asset.grouped ? uid('g') : null
     let els = asset.items.map(it => it.type === 'ink'
-      ? { id: uid(), type: 'ink', x: wx + it.dx, y: wy + it.dy, points: it.points, closed: it.closed, filled: it.filled, color: it.color || INK, width: it.width, groupId: g }
-      : { id: uid(), shape: it.shape, x: wx + it.dx, y: wy + it.dy, size: it.size, filled: it.filled, color: it.color || INK, strokeColor: it.strokeColor || INK, weight: it.weight, groupId: g })
+      ? { id: uid(), type: 'ink', x: wx + it.dx, y: wy + it.dy, points: it.points, closed: it.closed, filled: it.filled, color: it.color || INK, width: it.width, rotation: it.rotation, groupId: g }
+      : { id: uid(), shape: it.shape, x: wx + it.dx, y: wy + it.dy, size: it.size, filled: it.filled, color: it.color || INK, strokeColor: it.strokeColor || INK, weight: it.weight, rotation: it.rotation, groupId: g })
     const th = SNAP_PX / viewRef.current.scale
     const { ax, ay } = computeSnap(els, p.elements, th)
     els = els.map(e => ({ ...e, x: e.x + ax, y: e.y + ay }))
@@ -513,6 +520,12 @@ export default function App() {
     }
   }
 
+  const beginRotateGesture = (el, e) => {
+    e.stopPropagation()
+    trackPointer(e)
+    gesture.current = { type: 'rotate', id: el.id, docBefore: docRef.current }
+  }
+
   const beginHandleGesture = (el, e) => {
     e.stopPropagation()
     const pt = { x: e.clientX, y: e.clientY }
@@ -612,6 +625,22 @@ export default function App() {
       return
     }
 
+    if (g.type === 'rotate') {
+      const w = toWorld(pt.x, pt.y)
+      const p = pageRef.current
+      const el = p.elements.find(x => x.id === g.id)
+      if (!el) return
+      let ang = Math.atan2(w.y - el.y, w.x - el.x) * 180 / Math.PI + 90
+      // magnetic angles: every 15° (0/45/90… included), escapable
+      const snapped = Math.round(ang / 15) * 15
+      if (Math.abs(ang - snapped) < 6) ang = snapped
+      ang = ((ang % 360) + 360) % 360
+      setLive(d => updatePage(d, p.id, pg => ({
+        ...pg, elements: pg.elements.map(x => (x.id === g.id ? { ...x, rotation: ang % 360 === 0 ? 0 : ang } : x)),
+      })))
+      return
+    }
+
     if (g.type === 'toolDrag' || g.type === 'libDrag') {
       if (!g.moved && dist(pt, g.start) > TAP_PX) g.moved = true
       if (g.moved) setGhost({ x: pt.x, y: pt.y, shape: g.shape, asset: g.asset })
@@ -658,7 +687,7 @@ export default function App() {
       return
     }
 
-    if (g.type === 'resize') {
+    if (g.type === 'resize' || g.type === 'rotate') {
       if (docRef.current !== g.docBefore) pushHistory(g.docBefore)
       return
     }
@@ -841,7 +870,8 @@ export default function App() {
   const selBB = bboxOf(selEls)
   const singleGroupId = selEls.length > 1 && selEls.every(e => e.groupId && e.groupId === selEls[0].groupId)
     ? selEls[0].groupId : null
-  const singleFree = selEls.length === 1 && !selEls[0].groupId && selEls[0].type !== 'ink' ? selEls[0] : null
+  const singleSel = selEls.length === 1 && !selEls[0].groupId ? selEls[0] : null
+  const singleFree = singleSel && singleSel.type !== 'ink' ? singleSel : null
   const anyGrouped = selEls.some(e => e.groupId)
 
   /* group hairline frames for selected groups */
@@ -879,7 +909,7 @@ export default function App() {
               const d = inkPathD(el)
               const bb = elBBox(el)
               return (
-                <g key={el.id} onPointerDown={(e) => beginElementGesture(el.id, e)} style={{ cursor: 'pointer' }}>
+                <g key={el.id} transform={rotXf(el)} onPointerDown={(e) => beginElementGesture(el.id, e)} style={{ cursor: 'pointer' }}>
                   <path d={d}
                     fill={el.closed ? 'transparent' : 'none'}
                     stroke="transparent" strokeWidth={Math.max(16 / view.scale, 10)}
@@ -902,7 +932,7 @@ export default function App() {
             const outline = colored ? el.strokeColor : (el.weight ? INK : INK_DIM)
             const outlineW = el.weight || hair
             return (
-              <g key={el.id} onPointerDown={(e) => beginElementGesture(el.id, e)} style={{ cursor: 'pointer' }}>
+              <g key={el.id} transform={rotXf(el)} onPointerDown={(e) => beginElementGesture(el.id, e)} style={{ cursor: 'pointer' }}>
                 {el.shape === 'circle' ? (
                   <>
                     <circle cx={el.x} cy={el.y} r={hitR} fill="transparent" />
@@ -911,6 +941,18 @@ export default function App() {
                       fill={el.filled ? (el.color || INK) : 'transparent'}
                       stroke={outline}
                       strokeWidth={outlineW}
+                    />
+                    {selected && <circle cx={el.x} cy={el.y} r={el.size / 2 + 4 / view.scale} fill="none" stroke={ACCENT} strokeWidth={hair} />}
+                  </>
+                ) : el.shape === 'triangle' ? (
+                  <>
+                    <circle cx={el.x} cy={el.y} r={hitR} fill="transparent" />
+                    <polygon
+                      points={triPoints(el.x, el.y, el.size)}
+                      fill={el.filled ? (el.color || INK) : 'transparent'}
+                      stroke={outline}
+                      strokeWidth={outlineW}
+                      strokeLinejoin="round"
                     />
                     {selected && <circle cx={el.x} cy={el.y} r={el.size / 2 + 4 / view.scale} fill="none" stroke={ACCENT} strokeWidth={hair} />}
                   </>
@@ -1002,19 +1044,42 @@ export default function App() {
             />
           )}
 
-          {/* resize handles: single free element */}
+          {/* resize handles: single free element (rotate with the shape) */}
           {singleFree && (() => {
             const el = singleFree
             const h = el.size / 2 + 4 / view.scale
             const hs = 5 / view.scale
-            return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([mx, my], i) => (
-              <rect key={i}
-                x={el.x + mx * h - hs} y={el.y + my * h - hs} width={hs * 2} height={hs * 2}
-                fill={PAPER} stroke={ACCENT} strokeWidth={hair}
-                style={{ cursor: 'nwse-resize' }}
-                onPointerDown={(e) => beginHandleGesture(el, e)}
-              />
-            ))
+            return (
+              <g transform={rotXf(el)}>
+                {[[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([mx, my], i) => (
+                  <rect key={i}
+                    x={el.x + mx * h - hs} y={el.y + my * h - hs} width={hs * 2} height={hs * 2}
+                    fill={PAPER} stroke={ACCENT} strokeWidth={hair}
+                    style={{ cursor: 'nwse-resize' }}
+                    onPointerDown={(e) => beginHandleGesture(el, e)}
+                  />
+                ))}
+              </g>
+            )
+          })()}
+
+          {/* rotation handle: single selected element (circles have nothing to rotate) */}
+          {singleSel && singleSel.shape !== 'circle' && (() => {
+            const el = singleSel
+            const bb = elBBox(el)
+            const rd = Math.max(bb.r - bb.l, bb.b - bb.t) / 2 + 30 / view.scale
+            const ra = ((el.rotation || 0) - 90) * Math.PI / 180
+            const hx = el.x + Math.cos(ra) * rd, hy = el.y + Math.sin(ra) * rd
+            return (
+              <g>
+                <line x1={el.x} y1={el.y} x2={hx} y2={hy} stroke={ACCENT_60} strokeWidth={hair} pointerEvents="none" />
+                <circle cx={hx} cy={hy} r={20 / view.scale} fill="transparent"
+                  style={{ cursor: 'grab' }}
+                  onPointerDown={(e) => beginRotateGesture(el, e)} />
+                <circle cx={hx} cy={hy} r={7 / view.scale} fill={PAPER} stroke={ACCENT} strokeWidth={hair}
+                  pointerEvents="none" />
+              </g>
+            )
           })()}
         </g>
       </svg>
@@ -1173,6 +1238,12 @@ export default function App() {
         <ToolBtn active={tool === 'square'} onPointerDown={beginToolDrag('square')}>
           <svg width="24" height="24" viewBox="0 0 18 18">
             <rect x="2.5" y="2.5" width="13" height="13" fill="none" stroke={tool === 'square' ? ACCENT : INK} strokeWidth="1" />
+          </svg>
+        </ToolBtn>
+        <ToolBtn active={tool === 'triangle'} onPointerDown={beginToolDrag('triangle')}>
+          <svg width="24" height="24" viewBox="0 0 18 18">
+            <polygon points="9,2.5 15.5,14.5 2.5,14.5" fill="none"
+              stroke={tool === 'triangle' ? ACCENT : INK} strokeWidth="1" strokeLinejoin="round" />
           </svg>
         </ToolBtn>
         <ToolBtn active={tool === 'draw'} onPointerDown={(e) => e.stopPropagation()} onClick={() => setTool(t => (t === 'draw' ? null : 'draw'))}>
@@ -1336,6 +1407,8 @@ export default function App() {
             <div style={{ width: 48, height: 48 }}><AssetThumb asset={ghost.asset} /></div>
           ) : ghost.shape === 'circle' ? (
             <svg width="40" height="40"><circle cx="20" cy="20" r="19" fill="none" stroke={INK} strokeWidth="1" /></svg>
+          ) : ghost.shape === 'triangle' ? (
+            <svg width="40" height="40"><polygon points="20,2 38,37 2,37" fill="none" stroke={INK} strokeWidth="1" /></svg>
           ) : (
             <svg width="40" height="40"><rect x="1" y="1" width="38" height="38" fill="none" stroke={INK} strokeWidth="1" /></svg>
           )}
@@ -1400,20 +1473,25 @@ function AssetThumb({ asset }) {
   const sw = Math.max(w, h) / 40
   return (
     <svg width="100%" height="100%" viewBox={vb} preserveAspectRatio="xMidYMid meet" style={{ pointerEvents: 'none' }}>
-      {asset.items.map((it, i) => it.type === 'ink' ? (
-        <path key={i}
-          d={it.points.map(([dx, dy], j) => `${j ? 'L' : 'M'}${it.dx + dx} ${it.dy + dy}`).join('') + (it.closed ? 'Z' : '')}
-          fill={it.closed && it.filled ? (it.color || INK) : 'none'}
-          stroke={it.color || INK} strokeWidth={sw * 2} strokeLinejoin="round" strokeLinecap="round" />
-      ) : it.shape === 'circle' ? (
-        <circle key={i} cx={it.dx} cy={it.dy} r={it.size / 2}
-          fill={it.filled ? (it.color || INK) : 'none'}
-          stroke={it.strokeColor && it.strokeColor !== INK ? it.strokeColor : INK_DIM} strokeWidth={sw} />
-      ) : (
-        <rect key={i} x={it.dx - it.size / 2} y={it.dy - it.size / 2} width={it.size} height={it.size}
-          fill={it.filled ? (it.color || INK) : 'none'}
-          stroke={it.strokeColor && it.strokeColor !== INK ? it.strokeColor : INK_DIM} strokeWidth={sw} />
-      ))}
+      {asset.items.map((it, i) => {
+        const xf = it.rotation ? `rotate(${it.rotation} ${it.dx} ${it.dy})` : undefined
+        const oc = it.strokeColor && it.strokeColor !== INK ? it.strokeColor : INK_DIM
+        return it.type === 'ink' ? (
+          <path key={i} transform={xf}
+            d={it.points.map(([dx, dy], j) => `${j ? 'L' : 'M'}${it.dx + dx} ${it.dy + dy}`).join('') + (it.closed ? 'Z' : '')}
+            fill={it.closed && it.filled ? (it.color || INK) : 'none'}
+            stroke={it.color || INK} strokeWidth={sw * 2} strokeLinejoin="round" strokeLinecap="round" />
+        ) : it.shape === 'circle' ? (
+          <circle key={i} cx={it.dx} cy={it.dy} r={it.size / 2}
+            fill={it.filled ? (it.color || INK) : 'none'} stroke={oc} strokeWidth={sw} />
+        ) : it.shape === 'triangle' ? (
+          <polygon key={i} transform={xf} points={triPoints(it.dx, it.dy, it.size)}
+            fill={it.filled ? (it.color || INK) : 'none'} stroke={oc} strokeWidth={sw} strokeLinejoin="round" />
+        ) : (
+          <rect key={i} transform={xf} x={it.dx - it.size / 2} y={it.dy - it.size / 2} width={it.size} height={it.size}
+            fill={it.filled ? (it.color || INK) : 'none'} stroke={oc} strokeWidth={sw} />
+        )
+      })}
     </svg>
   )
 }
