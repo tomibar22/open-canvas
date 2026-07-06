@@ -221,7 +221,7 @@ export default function App() {
   /* ----- mutations ----- */
   const placeElement = useCallback((shape, wx, wy, withSnap = true) => {
     const p = pageRef.current
-    let el = { id: uid(), shape, x: wx, y: wy, size: DEFAULT_SIZE, filled: false, color: activeColorRef.current, strokeColor: activeColorRef.current, groupId: null }
+    let el = { id: uid(), shape, x: wx, y: wy, size: DEFAULT_SIZE, filled: false, color: activeColorRef.current, strokeColor: activeColorRef.current, weight: 1.25, groupId: null }
     if (withSnap) {
       const th = SNAP_PX / viewRef.current.scale
       const { ax, ay } = computeSnap([el], p.elements, th)
