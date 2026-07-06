@@ -1012,7 +1012,7 @@ export default function App() {
           position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
           pointerEvents: 'none',
         }}>
-          <span style={microLabel(0.35)}>TAP A SHAPE BELOW · THEN TAP THE CANVAS</span>
+          <span style={microLabel(0.35)}>TAP A SHAPE ON THE LEFT · THEN TAP THE CANVAS</span>
         </div>
       )}
 
