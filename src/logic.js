@@ -260,21 +260,12 @@ export function computeSnap(movingEls, statics, th) {
 
 /* ---------- quantize ---------- */
 /*
- Snap elements to their most sensible structure — conservative, like
- Ableton quantize: small corrections toward structure that is already
- almost there, never large rearrangements.
-
- Rules:
- - groups move as single units
- - clustering compares against the running cluster mean (no chain drift),
-   with tolerance capped so unrelated distant things never merge
- - alignment target is the median; members that would have to move more
-   than ~60% of their own size are left out (outliers stay put)
- - equal spacing only when the gaps are already roughly even
-   (max/min ≤ 2.4) and no member shifts more than 60% of the median gap
- - only sizes within 18% of each other equalize
-
- Returns a new elements array, or null if nothing would change.
+ Conservative auto-structure, like Ableton quantize: small corrections
+ toward structure that is already almost there, never big rearrangements.
+ One pass per axis: cluster -> align to median (outliers stay put) ->
+ equal-space lines whose gaps are already roughly even (max/min <= 2.4,
+ shifts <= 60% of the median gap). Sizes within 18% equalize.
+ Groups move as single units. Returns new elements or null.
 */
 export function quantizeElements(elements, selIds) {
   const scoped = selIds && selIds.size ? elements.filter(e => selIds.has(e.id)) : elements
@@ -282,87 +273,54 @@ export function quantizeElements(elements, selIds) {
 
   const byUnit = new Map()
   for (const el of scoped) {
-    const key = el.groupId ? 'g:' + el.groupId : el.id
-    if (!byUnit.has(key)) byUnit.set(key, [])
-    byUnit.get(key).push(el)
+    const k = el.groupId ? "g:" + el.groupId : el.id
+    byUnit.set(k, [...(byUnit.get(k) || []), el])
   }
   const units = [...byUnit.values()].map(els => {
     const bb = bboxOf(els)
     return { els, cx: bb.cx, cy: bb.cy, w: Math.max(bb.w, 1), h: Math.max(bb.h, 1) }
   })
+  const median = a2 => { const t = [...a2].sort((x, y) => x - y), m = t.length >> 1; return t.length % 2 ? t[m] : (t[m - 1] + t[m]) / 2 }
 
-  const tolOf = dim => clamp(0.45 * dim, 10, 36)
-  const median = arr => {
-    const s = [...arr].sort((a, b) => a - b)
-    const m = s.length >> 1
-    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2
-  }
-
-  const clusterBy = (getV, getDim) => {
-    const sorted = [...units].sort((a, b) => getV(a) - getV(b))
-    const clusters = []
-    let cur = [sorted[0]]
-    let mean = getV(sorted[0])
+  const axis = (main, perp, dim) => {
+    const sorted = [...units].sort((a2, b) => a2[perp] - b[perp])
+    const clusters = [[sorted[0]]]
     for (let i = 1; i < sorted.length; i++) {
-      const u = sorted[i]
-      const tol = Math.min(tolOf(getDim(u)), tolOf(getDim(cur[cur.length - 1])))
-      if (getV(u) - mean <= tol) {
-        cur.push(u)
-        mean = cur.reduce((s, x) => s + getV(x), 0) / cur.length
-      } else {
-        clusters.push(cur); cur = [u]; mean = getV(u)
-      }
+      const cl = clusters[clusters.length - 1]
+      const mean = cl.reduce((s2, u) => s2 + u[perp], 0) / cl.length
+      const tol = clamp(0.45 * Math.min(sorted[i][dim], cl[cl.length - 1][dim]), 10, 36)
+      if (sorted[i][perp] - mean <= tol) cl.push(sorted[i])
+      else clusters.push([sorted[i]])
     }
-    clusters.push(cur)
-    return clusters
-  }
-
-  const alignPass = (getV, setV, getDim) => {
-    for (const cl of clusterBy(getV, getDim)) {
+    for (const cl of clusters) {
       if (cl.length < 2) continue
-      const target = median(cl.map(getV))
-      const movers = cl.filter(u => Math.abs(getV(u) - target) <= Math.max(0.6 * getDim(u), 8))
+      const t0 = median(cl.map(u => u[perp]))
+      const movers = cl.filter(u => Math.abs(u[perp] - t0) <= Math.max(0.6 * u[dim], 8))
       if (movers.length < 2) continue
-      const t2 = median(movers.map(getV))
-      movers.forEach(u => setV(u, t2))
-    }
-  }
-  alignPass(u => u.cy, (u, v) => { u.cy = v }, u => u.h)
-  alignPass(u => u.cx, (u, v) => { u.cx = v }, u => u.w)
-
-  const spacePass = (getMain, setMain, getPerp) => {
-    // after alignment, a "line" is a set of units sharing the exact same perp coord
-    const lines = new Map()
-    for (const u of units) {
-      const k = Math.round(getPerp(u) * 10)
-      if (!lines.has(k)) lines.set(k, [])
-      lines.get(k).push(u)
-    }
-    for (const line of lines.values()) {
+      const t = median(movers.map(u => u[perp]))
+      movers.forEach(u => { u[perp] = t })
+      // equal spacing along the aligned line
+      const line = movers.sort((a2, b) => a2[main] - b[main])
       if (line.length < 3) continue
-      const s = [...line].sort((a, b) => getMain(a) - getMain(b))
-      const gaps = []
-      for (let i = 1; i < s.length; i++) gaps.push(getMain(s[i]) - getMain(s[i - 1]))
-      const gMin = Math.min(...gaps), gMax = Math.max(...gaps)
-      if (gMin <= 0) continue
-      if (gMax / gMin > 2.4) continue // uneven on purpose — leave it
-      const a = getMain(s[0]), b = getMain(s[s.length - 1])
+      const gaps = line.slice(1).map((u, i) => u[main] - line[i][main])
+      if (Math.min(...gaps) <= 0 || Math.max(...gaps) / Math.min(...gaps) > 2.4) continue
       const gMed = median(gaps)
-      const targets = s.map((u, i) => a + (b - a) * i / (s.length - 1))
-      if (s.some((u, i) => Math.abs(targets[i] - getMain(u)) > 0.6 * gMed)) continue
-      s.forEach((u, i) => setMain(u, targets[i]))
+      const a1 = line[0][main], b1 = line[line.length - 1][main]
+      const targets = line.map((u, i) => a1 + (b1 - a1) * i / (line.length - 1))
+      if (line.some((u, i) => Math.abs(targets[i] - u[main]) > 0.6 * gMed)) continue
+      line.forEach((u, i) => { u[main] = targets[i] })
     }
   }
-  spacePass(u => u.cx, (u, v) => { u.cx = v }, u => u.cy)
-  spacePass(u => u.cy, (u, v) => { u.cy = v }, u => u.cx)
+  axis("cx", "cy", "h") // rows
+  axis("cy", "cx", "w") // columns
 
   // equalize near-identical sizes (free shape elements only)
   const newSizes = new Map()
-  const shapes = scoped.filter(e => e.size && !e.groupId).sort((a, b) => a.size - b.size)
+  const shapes = scoped.filter(e => e.size && !e.groupId).sort((a2, b) => a2.size - b.size)
   let run = []
   const flush = () => {
     if (run.length >= 2) {
-      const m = run.reduce((s, e) => s + e.size, 0) / run.length
+      const m = run.reduce((s2, e) => s2 + e.size, 0) / run.length
       run.forEach(e => { if (Math.abs(m - e.size) > 0.01) newSizes.set(e.id, m) })
     }
     run = []
@@ -377,14 +335,12 @@ export function quantizeElements(elements, selIds) {
   for (const u of units) {
     const bb = bboxOf(u.els)
     const dx = u.cx - bb.cx, dy = u.cy - bb.cy
-    if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) continue
-    u.els.forEach(el => delta.set(el.id, [dx, dy]))
+    if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) u.els.forEach(el => delta.set(el.id, [dx, dy]))
   }
   if (!delta.size && !newSizes.size) return null
 
   return elements.map(e => {
-    const dl = delta.get(e.id)
-    const ns = newSizes.get(e.id)
+    const dl = delta.get(e.id), ns = newSizes.get(e.id)
     if (!dl && ns == null) return e
     const next = { ...e, x: e.x + (dl ? dl[0] : 0), y: e.y + (dl ? dl[1] : 0) }
     if (ns != null) next.size = ns
