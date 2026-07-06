@@ -1,16 +1,17 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
+import { clamp, dist, elBBox, bboxOf, inkPathD, pathLength, rdp, inkFromAbs, recognize, computeSnap, quantizeElements } from './logic.js'
 
 /* ============================================================
    OPEN CANVAS — Stage 1
    Infinite, calm, open-world canvas for structural thinking.
    Tokens (deterministic):
-     paper   #FAFAF7
+     paper   #F4F0E6  warm beige
      ink     #1A1A1A
      inkDim  rgba(26,26,26,0.3)   (empty-state hairline)
      accent  #E34234              (selection / snap guides)
    ============================================================ */
 
-const PAPER = '#FAFAF7'
+const PAPER = '#F4F0E6'
 const INK = '#1A1A1A'
 const INK_DIM = 'rgba(26,26,26,0.30)'
 const ACCENT = '#E34234'
@@ -37,266 +38,6 @@ const HISTORY_MAX = 50
 
 let _uid = 1
 const uid = (p = 'e') => p + (_uid++).toString(36) + Date.now().toString(36).slice(-4)
-const clamp = (v, a, b) => Math.min(b, Math.max(a, v))
-const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y)
-
-/* ---------- geometry ---------- */
-
-function elBBox(el) {
-  if (el.type === 'ink') {
-    let l = Infinity, r = -Infinity, t = Infinity, b = -Infinity
-    for (const [dx, dy] of el.points) {
-      const x = el.x + dx, y = el.y + dy
-      l = Math.min(l, x); r = Math.max(r, x)
-      t = Math.min(t, y); b = Math.max(b, y)
-    }
-    return { l, r, t, b, cx: (l + r) / 2, cy: (t + b) / 2, w: r - l, h2: b - t }
-  }
-  const h = el.size / 2
-  return { l: el.x - h, r: el.x + h, t: el.y - h, b: el.y + h, cx: el.x, cy: el.y, w: el.size, h2: el.size }
-}
-
-const inkPathD = (el) => el.points
-  .map(([dx, dy], i) => `${i ? 'L' : 'M'}${(el.x + dx).toFixed(2)} ${(el.y + dy).toFixed(2)}`)
-  .join('') + (el.closed ? 'Z' : '')
-
-/* ---------- freehand shape recognition ---------- */
-
-const pathLength = (pts) => {
-  let L = 0
-  for (let i = 1; i < pts.length; i++) L += dist(pts[i - 1], pts[i])
-  return L
-}
-
-function rdp(pts, eps) {
-  if (pts.length < 3) return pts.slice()
-  const a = pts[0], b = pts[pts.length - 1]
-  const dx = b.x - a.x, dy = b.y - a.y
-  const L = Math.hypot(dx, dy) || 1e-9
-  let maxD = 0, idx = 0
-  for (let i = 1; i < pts.length - 1; i++) {
-    const d = Math.abs(dy * (pts[i].x - a.x) - dx * (pts[i].y - a.y)) / L
-    if (d > maxD) { maxD = d; idx = i }
-  }
-  if (maxD > eps) {
-    const left = rdp(pts.slice(0, idx + 1), eps)
-    return left.slice(0, -1).concat(rdp(pts.slice(idx), eps))
-  }
-  return [a, b]
-}
-
-const inkFromAbs = (abs, closed) => {
-  let cx = 0, cy = 0
-  for (const p of abs) { cx += p.x; cy += p.y }
-  cx /= abs.length; cy /= abs.length
-  return { type: 'ink', x: cx, y: cy, points: abs.map(p => [p.x - cx, p.y - cy]), closed }
-}
-
-/*
- Recognize a raw stroke (world coords). Returns:
-   {type:'circle', cx, cy, r}      → becomes a real circle element
-   {type:'square', cx, cy, size}   → becomes a real square element
-   {type:'ink', x, y, points, closed} → perfected line / triangle / rect / polygon
-   null → keep the raw stroke
-*/
-function recognize(pts) {
-  if (pts.length < 4) return null
-  const len = pathLength(pts)
-  if (len < 12) return null
-  const first = pts[0], last = pts[pts.length - 1]
-  const closed = dist(first, last) < Math.max(len * 0.2, 12)
-
-  if (!closed) {
-    // straight line?
-    const dx = last.x - first.x, dy = last.y - first.y
-    const L = Math.hypot(dx, dy) || 1e-9
-    let maxDev = 0
-    for (const p of pts) {
-      maxDev = Math.max(maxDev, Math.abs(dy * (p.x - first.x) - dx * (p.y - first.y)) / L)
-    }
-    if (maxDev < Math.max(L * 0.08, 5)) {
-      let ang = Math.atan2(dy, dx)
-      const deg = ang * 180 / Math.PI
-      for (const s of [0, 45, 90, 135, 180, -45, -90, -135, -180]) {
-        if (Math.abs(deg - s) < 8) { ang = s * Math.PI / 180; break }
-      }
-      const mx = (first.x + last.x) / 2, my = (first.y + last.y) / 2
-      const h = L / 2, ca = Math.cos(ang), sa = Math.sin(ang)
-      return inkFromAbs([{ x: mx - ca * h, y: my - sa * h }, { x: mx + ca * h, y: my + sa * h }], false)
-    }
-    return null // open scribble stays freehand
-  }
-
-  // closed: circle vs polygon
-  let cx = 0, cy = 0
-  for (const p of pts) { cx += p.x; cy += p.y }
-  cx /= pts.length; cy /= pts.length
-  const radii = pts.map(p => Math.hypot(p.x - cx, p.y - cy))
-  const rMean = radii.reduce((s, r) => s + r, 0) / radii.length
-  const dev = Math.sqrt(radii.reduce((s, r) => s + (r - rMean) ** 2, 0) / radii.length) / (rMean || 1e-9)
-
-  let poly = rdp(pts, Math.max(len * 0.025, 4))
-  if (poly.length > 2 && dist(poly[0], poly[poly.length - 1]) < len * 0.1) poly = poly.slice(0, -1)
-  // keep only real corners: drop vertices where the direction barely turns
-  if (poly.length > 3) {
-    const corners = poly.filter((p, i) => {
-      const prev = poly[(i - 1 + poly.length) % poly.length]
-      const next = poly[(i + 1) % poly.length]
-      const a1 = Math.atan2(p.y - prev.y, p.x - prev.x)
-      const a2 = Math.atan2(next.y - p.y, next.x - p.x)
-      let turn = Math.abs(a1 - a2)
-      if (turn > Math.PI) turn = 2 * Math.PI - turn
-      return turn > 20 * Math.PI / 180
-    })
-    if (corners.length >= 3) poly = corners
-  }
-  const n = poly.length
-
-  if (dev < 0.10 || (n >= 6 && dev < 0.22)) {
-    return { type: 'circle', cx, cy, r: rMean }
-  }
-
-  if (n === 4) {
-    // near-axis-aligned quad → rectangle (square element when proportions allow)
-    const axisAligned = poly.every((p, i) => {
-      const q = poly[(i + 1) % 4]
-      const a = Math.abs(Math.atan2(q.y - p.y, q.x - p.x) * 180 / Math.PI)
-      return Math.min(a, Math.abs(a - 90), Math.abs(a - 180)) < 15
-    })
-    if (axisAligned) {
-      let l = Infinity, r = -Infinity, t = Infinity, b = -Infinity
-      for (const p of poly) { l = Math.min(l, p.x); r = Math.max(r, p.x); t = Math.min(t, p.y); b = Math.max(b, p.y) }
-      const w = r - l, h = b - t
-      if (w / h > 0.8 && w / h < 1.25) {
-        return { type: 'square', cx: (l + r) / 2, cy: (t + b) / 2, size: (w + h) / 2 }
-      }
-      return inkFromAbs([{ x: l, y: t }, { x: r, y: t }, { x: r, y: b }, { x: l, y: b }], true)
-    }
-    return inkFromAbs(poly, true)
-  }
-
-  if (n >= 3 && n <= 8) return inkFromAbs(poly, true)
-  return null
-}
-
-function bboxOf(els) {
-  if (!els.length) return null
-  let l = Infinity, r = -Infinity, t = Infinity, b = -Infinity
-  for (const el of els) {
-    const bb = elBBox(el)
-    l = Math.min(l, bb.l); r = Math.max(r, bb.r)
-    t = Math.min(t, bb.t); b = Math.max(b, bb.b)
-  }
-  return { l, r, t, b, cx: (l + r) / 2, cy: (t + b) / 2, w: r - l, h: b - t }
-}
-
-/* ---------- snapping engine ---------- */
-/*
- Given the set of moving elements (at proposed raw position) and the
- static elements on the page, returns {ax, ay, guides} — adjustments
- to apply, plus guide primitives for rendering:
-   guides.v: [{x, y1, y2}]      alignment verticals
-   guides.h: [{y, x1, x2}]      alignment horizontals
-   guides.gapX: [{y, xs}]       equal-gap markers along a row
-   guides.gapY: [{x, ys}]       equal-gap markers along a column
-*/
-function computeSnap(movingEls, statics, th) {
-  const bb = bboxOf(movingEls)
-  if (!bb) return { ax: 0, ay: 0, guides: null }
-
-  const alignAxis = (movVals, getStatVals) => {
-    let best = null
-    for (const s of statics) {
-      for (const sv of getStatVals(s)) {
-        for (const mv of movVals) {
-          const adj = sv - mv
-          if (Math.abs(adj) <= th && (!best || Math.abs(adj) < Math.abs(best.adj))) {
-            best = { adj, v: sv, s }
-          }
-        }
-      }
-    }
-    return best
-  }
-
-  const sx = s => { const e = elBBox(s); return [e.l, e.cx, e.r] }
-  const sy = s => { const e = elBBox(s); return [e.t, e.cy, e.b] }
-
-  const bestAX = alignAxis([bb.l, bb.cx, bb.r], sx)
-  const bestAY = alignAxis([bb.t, bb.cy, bb.b], sy)
-
-  // equal-spacing candidates (uses the alignment-adjusted perpendicular)
-  const cyNow = bb.cy + (bestAY ? bestAY.adj : 0)
-  const cxNow = bb.cx + (bestAX ? bestAX.adj : 0)
-
-  const spacing = (centerNow, perpNow, mainOf, perpOf, perpTolOf) => {
-    const row = statics.filter(s =>
-      Math.abs(perpOf(s) - perpNow) <= Math.max(perpTolOf(s), Math.min(bb.w, bb.h) / 2) + 1)
-    row.sort((a, b) => mainOf(a) - mainOf(b))
-    let best = null
-    for (let i = 0; i < row.length; i++) {
-      for (let j = i + 1; j < row.length; j++) {
-        const a = mainOf(row[i]), b = mainOf(row[j])
-        const d = b - a
-        if (d < 4) continue
-        for (const cand of [a - d, b + d, (a + b) / 2]) {
-          const adj = cand - centerNow
-          if (Math.abs(adj) <= th && (!best || Math.abs(adj) < Math.abs(best.adj))) {
-            best = { adj, cand, pair: [a, b] }
-          }
-        }
-      }
-    }
-    return best
-  }
-
-  const halfMin = s => { const e = elBBox(s); return Math.min(e.r - e.l, e.b - e.t) / 2 }
-  const spX = spacing(bb.cx, cyNow, s => elBBox(s).cx, s => elBBox(s).cy, halfMin)
-  const spY = spacing(bb.cy, cxNow, s => elBBox(s).cy, s => elBBox(s).cx, halfMin)
-
-  // choose per axis: spacing wins if at least as close (it is the rarer, more precious snap)
-  let ax = 0, useSpX = false
-  if (spX && (!bestAX || Math.abs(spX.adj) <= Math.abs(bestAX.adj) + 0.5)) { ax = spX.adj; useSpX = true }
-  else if (bestAX) ax = bestAX.adj
-
-  let ay = 0, useSpY = false
-  if (spY && (!bestAY || Math.abs(spY.adj) <= Math.abs(bestAY.adj) + 0.5)) { ay = spY.adj; useSpY = true }
-  else if (bestAY) ay = bestAY.adj
-
-  /* ---- guides ---- */
-  const guides = { v: [], h: [], gapX: [], gapY: [] }
-  const fl = bb.l + ax, fr = bb.r + ax, ft = bb.t + ay, fbm = bb.b + ay
-  const fcx = bb.cx + ax, fcy = bb.cy + ay
-
-  if (!useSpX && bestAX) {
-    const v = bestAX.v
-    let y1 = ft, y2 = fbm
-    for (const s of statics) {
-      const e = elBBox(s)
-      if ([e.l, e.cx, e.r].some(sv => Math.abs(sv - v) < 0.5)) { y1 = Math.min(y1, e.t); y2 = Math.max(y2, e.b) }
-    }
-    guides.v.push({ x: v, y1: y1 - 14, y2: y2 + 14 })
-  }
-  if (!useSpY && bestAY) {
-    const vv = bestAY.v
-    let x1 = fl, x2 = fr
-    for (const s of statics) {
-      const e = elBBox(s)
-      if ([e.t, e.cy, e.b].some(sv => Math.abs(sv - vv) < 0.5)) { x1 = Math.min(x1, e.l); x2 = Math.max(x2, e.r) }
-    }
-    guides.h.push({ y: vv, x1: x1 - 14, x2: x2 + 14 })
-  }
-  if (useSpX && spX) {
-    const xs = [...spX.pair, fcx].sort((a, b) => a - b)
-    guides.gapX.push({ y: fcy, xs })
-  }
-  if (useSpY && spY) {
-    const ys = [...spY.pair, fcy].sort((a, b) => a - b)
-    guides.gapY.push({ x: fcx, ys })
-  }
-
-  return { ax, ay, guides: (guides.v.length || guides.h.length || guides.gapX.length || guides.gapY.length) ? guides : null }
-}
 
 /* ---------- document helpers ---------- */
 
@@ -425,6 +166,8 @@ export default function App() {
   const activeColorRef = useRef(activeColor); activeColorRef.current = activeColor
   const [penWidth, setPenWidth] = useState(2.5) // world units: 1.25 fine / 2.5 regular / 5 bold
   const penWidthRef = useRef(penWidth); penWidthRef.current = penWidth
+  const [colorTarget, setColorTarget] = useState('fill') // 'fill' | 'line' — what palette taps recolor on a selection
+  const colorTargetRef = useRef(colorTarget); colorTargetRef.current = colorTarget
   const [marquee, setMarquee] = useState(null) // {x1,y1,x2,y2} world
   const [drawing, setDrawing] = useState(null) // {pts:[{x,y}], color, preview} world
   const [guides, setGuides] = useState(null)
@@ -502,15 +245,18 @@ export default function App() {
     })))
   }, [commit])
 
+  /* palette tap on a selection recolors the active target: fill or line */
   const applyColorToSelection = useCallback((c) => {
     const ids = selRef.current
     if (!ids.size) return
+    const target = colorTargetRef.current
     commit(d => updatePage(d, pageIdRef.current, pg => ({
       ...pg,
       elements: pg.elements.map(e => {
         if (!ids.has(e.id)) return e
-        if (e.type === 'ink') return { ...e, color: c }
-        return { ...e, filled: true, color: c } // keep the border in its own color
+        if (e.type === 'ink') return { ...e, color: c } // ink has one color
+        if (target === 'line') return { ...e, strokeColor: c }
+        return { ...e, filled: true, color: c }
       }),
     })))
   }, [commit])
@@ -630,106 +376,11 @@ export default function App() {
     })))
   }, [commit])
 
-  /* Quantize — like Ableton: snap what's on the canvas to its most sensible
-     structure. Selection if there is one, otherwise the whole page.
-     Groups move as single units. Passes: row y-align → column x-align →
-     equal spacing in rows → equal spacing in columns → equalize similar sizes. */
+  /* Quantize — conservative auto-structure; pure logic in logic.js */
   const quantize = useCallback(() => {
     commit(d => updatePage(d, pageIdRef.current, pg => {
-      const selIds = selRef.current
-      const pool = pg.elements.filter(e => !selIds.size || selIds.has(e.id))
-      if (pool.length < 2) return pg
-
-      const byUnit = new Map()
-      for (const el of pool) {
-        const key = el.groupId ? 'g:' + el.groupId : el.id
-        if (!byUnit.has(key)) byUnit.set(key, [])
-        byUnit.get(key).push(el)
-      }
-      const units = [...byUnit.values()].map(els => {
-        const bb = bboxOf(els)
-        return { els, cx: bb.cx, cy: bb.cy, w: bb.w, h: bb.h }
-      })
-
-      const clusterBy = (getV, getDim) => {
-        const sorted = [...units].sort((a, b) => getV(a) - getV(b))
-        const clusters = []
-        let cur = [sorted[0]]
-        for (let i = 1; i < sorted.length; i++) {
-          const tol = Math.max(0.5 * Math.min(getDim(sorted[i - 1]), getDim(sorted[i])), 12)
-          if (getV(sorted[i]) - getV(sorted[i - 1]) <= tol) cur.push(sorted[i])
-          else { clusters.push(cur); cur = [sorted[i]] }
-        }
-        clusters.push(cur)
-        return clusters
-      }
-
-      // 1) rows: align centers-y
-      for (const cl of clusterBy(u => u.cy, u => u.h)) {
-        if (cl.length < 2) continue
-        const m = cl.reduce((s, u) => s + u.cy, 0) / cl.length
-        cl.forEach(u => { u.cy = m })
-      }
-      // 2) columns: align centers-x
-      for (const cl of clusterBy(u => u.cx, u => u.w)) {
-        if (cl.length < 2) continue
-        const m = cl.reduce((s, u) => s + u.cx, 0) / cl.length
-        cl.forEach(u => { u.cx = m })
-      }
-      // 3) equal spacing along rows
-      for (const cl of clusterBy(u => u.cy, u => u.h)) {
-        if (cl.length < 3) continue
-        const s = [...cl].sort((a, b) => a.cx - b.cx)
-        const a = s[0].cx, b = s[s.length - 1].cx
-        s.forEach((u, i) => { u.cx = a + (b - a) * i / (s.length - 1) })
-      }
-      // 4) equal spacing along columns
-      for (const cl of clusterBy(u => u.cx, u => u.w)) {
-        if (cl.length < 3) continue
-        const s = [...cl].sort((a, b) => a.cy - b.cy)
-        const a = s[0].cy, b = s[s.length - 1].cy
-        s.forEach((u, i) => { u.cy = a + (b - a) * i / (s.length - 1) })
-      }
-      // 5) equalize similar sizes (free shape elements only)
-      const newSizes = new Map()
-      const shapes = pool.filter(e => e.size && !e.groupId).sort((a, b) => a.size - b.size)
-      let run = []
-      const flush = () => {
-        if (run.length >= 2) {
-          const m = run.reduce((s, e) => s + e.size, 0) / run.length
-          run.forEach(e => newSizes.set(e.id, m))
-        }
-        run = []
-      }
-      for (const e of shapes) {
-        if (run.length && e.size / run[run.length - 1].size > 1.22) flush()
-        run.push(e)
-      }
-      flush()
-
-      // apply unit deltas
-      const delta = new Map()
-      for (const u of units) {
-        const bb = bboxOf(u.els)
-        const ddx = u.cx - bb.cx, ddy = u.cy - bb.cy
-        if (Math.abs(ddx) < 0.01 && Math.abs(ddy) < 0.01) continue
-        u.els.forEach(el => delta.set(el.id, [ddx, ddy]))
-      }
-      if (!delta.size && !newSizes.size) return pg
-      return {
-        ...pg,
-        elements: pg.elements.map(e => {
-          const dl = delta.get(e.id)
-          const ns = newSizes.get(e.id)
-          if (!dl && ns == null) return e
-          return {
-            ...e,
-            x: e.x + (dl ? dl[0] : 0),
-            y: e.y + (dl ? dl[1] : 0),
-            ...(ns != null && Math.abs(ns - e.size) > 0.01 ? { size: ns } : {}),
-          }
-        }),
-      }
+      const next = quantizeElements(pg.elements, selRef.current)
+      return next ? { ...pg, elements: next } : pg
     }))
   }, [commit])
 
@@ -1047,7 +698,11 @@ export default function App() {
           return
         }
         lastCanvasTap.current = { ...pt, t: now }
-        if (toolRef.current && toolRef.current !== 'select') {
+        // dismiss first, create second: a tap while something is selected
+        // only clears the selection — it never also places a new element
+        if (selRef.current.size) {
+          setSel(new Set()); setSelectMode(false)
+        } else if (toolRef.current && toolRef.current !== 'select') {
           const w = toWorld(pt.x, pt.y)
           placeElement(toolRef.current, w.x, w.y)
         } else {
@@ -1141,6 +796,9 @@ export default function App() {
     return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up) }
   }, [undo, redo, duplicateSelection, groupSelection, deleteSelection, quantize])
 
+  /* palette taps go back to recoloring fill when nothing is selected */
+  useEffect(() => { if (!sel.size) setColorTarget('fill') }, [sel])
+
   /* prune selection when elements vanish (undo etc.) */
   useEffect(() => {
     const ids = new Set(page.elements.map(e => e.id))
@@ -1229,7 +887,6 @@ export default function App() {
             const hitR = Math.max(el.size / 2, 20 / view.scale)
             const colored = el.strokeColor && el.strokeColor !== INK
             const outline = colored ? el.strokeColor : (el.weight ? INK : INK_DIM)
-            const outlineOp = colored ? 0.75 : 1
             const outlineW = el.weight || hair
             return (
               <g key={el.id} onPointerDown={(e) => beginElementGesture(el.id, e)} style={{ cursor: 'pointer' }}>
@@ -1240,7 +897,6 @@ export default function App() {
                       cx={el.x} cy={el.y} r={el.size / 2}
                       fill={el.filled ? (el.color || INK) : 'transparent'}
                       stroke={outline}
-                      strokeOpacity={outlineOp}
                       strokeWidth={outlineW}
                     />
                     {selected && <circle cx={el.x} cy={el.y} r={el.size / 2 + 4 / view.scale} fill="none" stroke={ACCENT} strokeWidth={hair} />}
@@ -1252,7 +908,6 @@ export default function App() {
                       x={el.x - el.size / 2} y={el.y - el.size / 2} width={el.size} height={el.size}
                       fill={el.filled ? (el.color || INK) : 'transparent'}
                       stroke={outline}
-                      strokeOpacity={outlineOp}
                       strokeWidth={outlineW}
                     />
                     {selected && (
@@ -1365,8 +1020,8 @@ export default function App() {
       {barPos && sel.size > 0 && (
         <div style={{
           position: 'absolute',
-          left: clamp(barPos.x, 130, window.innerWidth - 130),
-          top: Math.max(barPos.y - 40, 12),
+          left: clamp(barPos.x, 200, window.innerWidth - 200),
+          top: Math.max(barPos.y - 48, 12),
           transform: 'translate(-50%, 0)',
           display: 'flex', gap: 1, alignItems: 'stretch',
           border: `1px solid ${INK}`, background: PAPER,
@@ -1388,8 +1043,32 @@ export default function App() {
               {anyGrouped && <BarBtn label="UNGROUP" onClick={ungroupSelection} />}
             </>
           )}
+          {/* color target: palette taps recolor FILL or LINE of the selection */}
+          {(() => {
+            const first = selEls[0]
+            const fillC = first ? (first.color || INK) : INK
+            const lineC = first ? (first.type === 'ink' ? (first.color || INK) : (first.strokeColor || INK)) : INK
+            const chip = (target, label, dot) => (
+              <button
+                key={target}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={() => setColorTarget(target)}
+                style={{
+                  ...barBtnStyle, display: 'flex', alignItems: 'center', gap: 6,
+                  color: colorTarget === target ? ACCENT : INK,
+                  borderBottom: colorTarget === target ? `2px solid ${ACCENT}` : '2px solid transparent',
+                }}
+              >{dot}{label}</button>
+            )
+            return (
+              <>
+                {chip('fill', 'FILL', <span style={{ width: 12, height: 12, borderRadius: '50%', background: fillC, display: 'inline-block' }} />)}
+                {chip('line', 'LINE', <span style={{ width: 12, height: 12, borderRadius: '50%', border: `2.5px solid ${lineC}`, display: 'inline-block' }} />)}
+              </>
+            )
+          })()}
           <BarBtn label="−" wide={false} onClick={() => scaleSelection(1 / 1.2)} />
-          <div style={{ ...barBtnStyle, cursor: 'default', padding: '9px 2px', opacity: 0.55 }}>SIZE</div>
+          <div style={{ ...barBtnStyle, cursor: 'default', padding: '12px 2px', opacity: 0.55 }}>SIZE</div>
           <BarBtn label="+" wide={false} onClick={() => scaleSelection(1.2)} />
           {selEls.some(e => e.type === 'ink' || !e.filled) && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 8px' }}>
@@ -1400,13 +1079,13 @@ export default function App() {
                   onClick={() => setSelWeight(w)}
                   title={`Stroke ${w}`}
                   style={{
-                    width: 20, height: 14, padding: 0, cursor: 'pointer', background: 'transparent',
+                    width: 30, height: 22, padding: 0, cursor: 'pointer', background: 'transparent',
                     border: '1px solid rgba(26,26,26,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center',
                   }}
                 >
-                  <svg width="14" height="8">
-                    <line x1="1" y1="4" x2="13" y2="4" stroke={INK}
-                      strokeWidth={w === 1.25 ? 1 : w === 2.5 ? 2.5 : 4.5} strokeLinecap="round" />
+                  <svg width="22" height="12">
+                    <line x1="2" y1="6" x2="20" y2="6" stroke={INK}
+                      strokeWidth={w === 1.25 ? 1.5 : w === 2.5 ? 3 : 5.5} strokeLinecap="round" />
                   </svg>
                 </button>
               ))}
@@ -1423,7 +1102,7 @@ export default function App() {
         display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
       }}>
         {/* muted fill palette + pen weight (weight only while drawing) */}
-        <div style={{ display: 'flex', gap: 8, padding: '4px 2px', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 14, padding: '6px 4px', alignItems: 'center' }}>
           {PALETTE.map(c => (
             <button
               key={c}
@@ -1431,17 +1110,17 @@ export default function App() {
               onClick={() => { setActiveColor(c); if (selRef.current.size) applyColorToSelection(c) }}
               title={c}
               style={{
-                width: 16, height: 16, borderRadius: '50%', padding: 0, cursor: 'pointer',
+                width: 28, height: 28, borderRadius: '50%', padding: 0, cursor: 'pointer',
                 background: c,
                 border: 'none',
-                outline: activeColor === c ? `1px solid ${ACCENT}` : '1px solid rgba(26,26,26,0.15)',
-                outlineOffset: 2,
+                outline: activeColor === c ? `2px solid ${ACCENT}` : '1px solid rgba(26,26,26,0.15)',
+                outlineOffset: 3,
               }}
             />
           ))}
           {tool === 'draw' && (
             <>
-              <div style={{ width: 1, height: 16, background: 'rgba(26,26,26,0.2)', margin: '0 4px' }} />
+              <div style={{ width: 1, height: 24, background: 'rgba(26,26,26,0.2)', margin: '0 4px' }} />
               {[1.25, 2.5, 5].map(w => (
                 <button
                   key={w}
@@ -1449,15 +1128,15 @@ export default function App() {
                   onClick={() => setPenWidth(w)}
                   title={`Pen ${w}`}
                   style={{
-                    width: 22, height: 16, padding: 0, cursor: 'pointer', background: 'transparent',
+                    width: 34, height: 26, padding: 0, cursor: 'pointer', background: 'transparent',
                     border: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    outline: penWidth === w ? `1px solid ${ACCENT}` : '1px solid rgba(26,26,26,0.15)',
-                    outlineOffset: 2,
+                    outline: penWidth === w ? `2px solid ${ACCENT}` : '1px solid rgba(26,26,26,0.15)',
+                    outlineOffset: 3,
                   }}
                 >
-                  <svg width="18" height="10">
-                    <line x1="2" y1="5" x2="16" y2="5" stroke={INK}
-                      strokeWidth={w === 1.25 ? 1 : w === 2.5 ? 2.5 : 4.5} strokeLinecap="round" />
+                  <svg width="26" height="14">
+                    <line x1="3" y1="7" x2="23" y2="7" stroke={INK}
+                      strokeWidth={w === 1.25 ? 1.5 : w === 2.5 ? 3.5 : 6} strokeLinecap="round" />
                   </svg>
                 </button>
               ))}
@@ -1469,23 +1148,23 @@ export default function App() {
           touchAction: 'none',
         }}>
         <ToolBtn active={tool === 'select'} onPointerDown={(e) => e.stopPropagation()} onClick={() => setTool(t => (t === 'select' ? null : 'select'))}>
-          <svg width="18" height="18" viewBox="0 0 18 18">
+          <svg width="24" height="24" viewBox="0 0 18 18">
             <rect x="2.5" y="2.5" width="13" height="13" fill="none"
               stroke={tool === 'select' ? ACCENT : INK} strokeWidth="1" strokeDasharray="3 2.2" />
           </svg>
         </ToolBtn>
         <ToolBtn active={tool === 'circle'} onPointerDown={beginToolDrag('circle')}>
-          <svg width="18" height="18" viewBox="0 0 18 18">
+          <svg width="24" height="24" viewBox="0 0 18 18">
             <circle cx="9" cy="9" r="7" fill="none" stroke={tool === 'circle' ? ACCENT : INK} strokeWidth="1" />
           </svg>
         </ToolBtn>
         <ToolBtn active={tool === 'square'} onPointerDown={beginToolDrag('square')}>
-          <svg width="18" height="18" viewBox="0 0 18 18">
+          <svg width="24" height="24" viewBox="0 0 18 18">
             <rect x="2.5" y="2.5" width="13" height="13" fill="none" stroke={tool === 'square' ? ACCENT : INK} strokeWidth="1" />
           </svg>
         </ToolBtn>
         <ToolBtn active={tool === 'draw'} onPointerDown={(e) => e.stopPropagation()} onClick={() => setTool(t => (t === 'draw' ? null : 'draw'))}>
-          <svg width="18" height="18" viewBox="0 0 18 18">
+          <svg width="24" height="24" viewBox="0 0 18 18">
             <path d="M2.5 13.5 C 5 4.5, 9 15, 15.5 4" fill="none"
               stroke={tool === 'draw' ? ACCENT : INK} strokeWidth="1" strokeLinecap="round" />
           </svg>
@@ -1499,10 +1178,10 @@ export default function App() {
         >QUANTIZE</button>
         <div style={{ width: 1, background: INK }} />
         <ToolBtn onPointerDown={(e) => { e.stopPropagation() }} onClick={undo}>
-          <span style={{ fontSize: 14, color: INK }}>↺</span>
+          <span style={{ fontSize: 20, color: INK }}>↺</span>
         </ToolBtn>
         <ToolBtn onPointerDown={(e) => { e.stopPropagation() }} onClick={redo}>
-          <span style={{ fontSize: 14, color: INK }}>↻</span>
+          <span style={{ fontSize: 20, color: INK }}>↻</span>
         </ToolBtn>
         </div>
       </div>
@@ -1528,7 +1207,7 @@ export default function App() {
           {pagesOpen ? '× PAGES' : 'PAGES'}
         </button>
         {pagesOpen && (
-          <div style={{ marginTop: 1, border: `1px solid ${INK}`, background: PAPER, minWidth: 180 }}>
+          <div style={{ marginTop: 1, border: `1px solid ${INK}`, background: PAPER, minWidth: 230 }}>
             {doc.pages.map(p => (
               <div key={p.id} style={{
                 display: 'flex', alignItems: 'center', gap: 4,
@@ -1540,8 +1219,8 @@ export default function App() {
                     autoFocus defaultValue={p.name}
                     style={{
                       flex: 1, border: 'none', outline: 'none', background: 'transparent',
-                      font: '11px "Helvetica Neue", Inter, Arial, sans-serif', letterSpacing: '0.08em',
-                      padding: '8px 10px', color: INK,
+                      font: '13px "Helvetica Neue", Inter, Arial, sans-serif', letterSpacing: '0.08em',
+                      padding: '11px 14px', color: INK,
                     }}
                     onBlur={(ev) => {
                       const name = ev.target.value.trim() || p.name
@@ -1597,7 +1276,7 @@ export default function App() {
         </button>
         {libOpen && (
           <div style={{
-            marginTop: 1, border: `1px solid ${INK}`, background: PAPER, width: 168,
+            marginTop: 1, border: `1px solid ${INK}`, background: PAPER, width: 216,
             maxHeight: '60vh', overflowY: 'auto', touchAction: 'pan-y',
           }}>
             {doc.library.length === 0 && (
@@ -1611,7 +1290,7 @@ export default function App() {
                   <div
                     onPointerDown={beginLibDrag(a)}
                     style={{
-                      width: 64, height: 64, border: `1px solid rgba(26,26,26,0.25)`,
+                      width: 88, height: 88, border: `1px solid rgba(26,26,26,0.25)`,
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
                       cursor: 'grab', touchAction: 'none', background: PAPER,
                     }}
@@ -1621,9 +1300,9 @@ export default function App() {
                   <button
                     onClick={() => deleteAsset(a.id)}
                     style={{
-                      position: 'absolute', top: -6, right: -6, width: 16, height: 16,
+                      position: 'absolute', top: -8, right: -8, width: 22, height: 22,
                       border: `1px solid ${INK}`, background: PAPER, color: INK,
-                      fontSize: 9, lineHeight: '13px', padding: 0, cursor: 'pointer',
+                      fontSize: 12, lineHeight: '19px', padding: 0, cursor: 'pointer',
                     }}
                   >×</button>
                 </div>
@@ -1654,13 +1333,13 @@ export default function App() {
    ============================================================ */
 
 const barBtnStyle = {
-  font: '10px "Helvetica Neue", Inter, Arial, sans-serif',
+  font: '13px "Helvetica Neue", Inter, Arial, sans-serif',
   letterSpacing: '0.12em',
   textTransform: 'uppercase',
   color: INK,
   background: 'transparent',
   border: 'none',
-  padding: '9px 12px',
+  padding: '13px 16px',
   cursor: 'pointer',
   whiteSpace: 'nowrap',
   userSelect: 'none',
@@ -1668,7 +1347,7 @@ const barBtnStyle = {
 }
 
 const microLabel = (opacity = 0.5) => ({
-  font: '10px "Helvetica Neue", Inter, Arial, sans-serif',
+  font: '12px "Helvetica Neue", Inter, Arial, sans-serif',
   letterSpacing: '0.18em',
   color: INK,
   opacity,
@@ -1689,7 +1368,7 @@ function ToolBtn({ active, children, ...rest }) {
   return (
     <button style={{
       ...barBtnStyle,
-      padding: '10px 14px',
+      padding: '14px 18px',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       background: active ? 'rgba(227,66,52,0.07)' : 'transparent',
       touchAction: 'none',
