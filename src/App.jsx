@@ -536,7 +536,9 @@ export default function App() {
   const onPointerMove = useCallback((e) => {
     if (!pointers.current.has(e.pointerId)) return
     const pt = { x: e.clientX, y: e.clientY }
-    trackPointer(e)
+    // plain update — never clear here, or a moving primary finger would
+    // wipe the second finger out of the map and kill the pinch
+    pointers.current.set(e.pointerId, pt)
     const g = gesture.current
     if (!g) return
 
