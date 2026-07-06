@@ -160,7 +160,7 @@ export default function App() {
   const selRef = useRef(sel); selRef.current = sel
   const [selectMode, setSelectMode] = useState(false)
   const selectModeRef = useRef(selectMode); selectModeRef.current = selectMode
-  const [tool, setTool] = useState(null) // 'circle' | 'square' | 'select' | null
+  const [tool, setTool] = useState(null) // 'circle' | 'square' | 'draw' | null
   const toolRef = useRef(tool); toolRef.current = tool
   const [activeColor, setActiveColor] = useState(PALETTE[0])
   const activeColorRef = useRef(activeColor); activeColorRef.current = activeColor
@@ -486,17 +486,23 @@ export default function App() {
     const pt = { x: e.clientX, y: e.clientY }
     pointers.current.set(e.pointerId, pt)
     if (startPinchIfTwo()) return
-    if (toolRef.current === 'select' && !forcePan) {
-      gesture.current = { type: 'marquee', start: pt, world0: toWorld(pt.x, pt.y), moved: false }
-      return
-    }
     if (toolRef.current === 'draw' && !forcePan) {
       const w = toWorld(pt.x, pt.y)
       gesture.current = { type: 'draw', pts: [w], lastScreen: pt, snapped: null, holdTimer: null }
       setDrawing({ pts: [w], color: activeColorRef.current, preview: null })
       return
     }
-    gesture.current = { type: 'canvas', start: pt, view0: viewRef.current, moved: false, forcePan }
+    const g = { type: 'canvas', start: pt, view0: viewRef.current, moved: false, forcePan }
+    gesture.current = g
+    // long-press on the canvas turns the gesture into a selection marquee
+    if (!forcePan) {
+      clearLongTimer()
+      longTimer.current = setTimeout(() => {
+        if (gesture.current !== g || g.moved) return
+        gesture.current = { type: 'marquee', start: pt, world0: toWorld(pt.x, pt.y), moved: false }
+        if (navigator.vibrate) navigator.vibrate(10)
+      }, LONG_PRESS_MS)
+    }
   }
 
   const beginHandleGesture = (el, e) => {
@@ -524,7 +530,7 @@ export default function App() {
 
     if (g.type === 'canvas') {
       const dx = pt.x - g.start.x, dy = pt.y - g.start.y
-      if (!g.moved && Math.hypot(dx, dy) > TAP_PX) g.moved = true
+      if (!g.moved && Math.hypot(dx, dy) > TAP_PX) { g.moved = true; clearLongTimer() }
       if (g.moved) setView({ ...g.view0, tx: g.view0.tx + dx, ty: g.view0.ty + dy })
       return
     }
@@ -627,8 +633,7 @@ export default function App() {
         setGuides(null)
       } else if (!g.longPressed) {
         // tap
-        if (selectModeRef.current || toolRef.current === 'select') {
-          if (!selectModeRef.current) setSelectMode(true)
+        if (selectModeRef.current) {
           const add = expandSel([g.id])
           setSel(prev => {
             const n = new Set(prev)
@@ -702,7 +707,7 @@ export default function App() {
         // only clears the selection — it never also places a new element
         if (selRef.current.size) {
           setSel(new Set()); setSelectMode(false)
-        } else if (toolRef.current && toolRef.current !== 'select') {
+        } else if (toolRef.current) {
           const w = toWorld(pt.x, pt.y)
           placeElement(toolRef.current, w.x, w.y)
         } else {
@@ -1148,12 +1153,6 @@ export default function App() {
           display: 'flex', flexDirection: 'column', gap: 1, border: `1px solid ${INK}`, background: PAPER,
           touchAction: 'none',
         }}>
-        <ToolBtn active={tool === 'select'} onPointerDown={(e) => e.stopPropagation()} onClick={() => setTool(t => (t === 'select' ? null : 'select'))}>
-          <svg width="24" height="24" viewBox="0 0 18 18">
-            <rect x="2.5" y="2.5" width="13" height="13" fill="none"
-              stroke={tool === 'select' ? ACCENT : INK} strokeWidth="1" strokeDasharray="3 2.2" />
-          </svg>
-        </ToolBtn>
         <ToolBtn active={tool === 'circle'} onPointerDown={beginToolDrag('circle')}>
           <svg width="24" height="24" viewBox="0 0 18 18">
             <circle cx="9" cy="9" r="7" fill="none" stroke={tool === 'circle' ? ACCENT : INK} strokeWidth="1" />
@@ -1172,11 +1171,14 @@ export default function App() {
         </ToolBtn>
         <div style={{ height: 1, background: INK }} />
         <ToolBtn onPointerDown={(e) => { e.stopPropagation() }} onClick={quantize} title="Quantize — auto-align everything (Q)">
-          <svg width="24" height="24" viewBox="0 0 18 18">
-            <line x1="2" y1="9" x2="16" y2="9" stroke={INK} strokeWidth="0.75" strokeDasharray="1.5 1.5" />
-            <circle cx="4.5" cy="9" r="2" fill={INK} />
-            <circle cx="9" cy="9" r="2" fill="none" stroke={INK} strokeWidth="1" />
-            <circle cx="13.5" cy="9" r="2" fill={INK} />
+          {/* a stray dot dropping into place on an aligned row */}
+          <svg width="26" height="26" viewBox="0 0 18 18">
+            <line x1="1.5" y1="13.5" x2="16.5" y2="13.5" stroke={INK} strokeWidth="1" />
+            <circle cx="4.5" cy="13.5" r="2.4" fill={INK} />
+            <circle cx="9" cy="13.5" r="2.4" fill={INK} />
+            <circle cx="13.5" cy="4" r="2.4" fill="none" stroke={INK} strokeWidth="1" />
+            <line x1="13.5" y1="6.8" x2="13.5" y2="10.2" stroke={INK} strokeWidth="1" strokeDasharray="1.6 1.4" />
+            <path d="M12 9.2 L13.5 11.2 L15 9.2" fill="none" stroke={INK} strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </ToolBtn>
         <div style={{ height: 1, background: INK }} />
