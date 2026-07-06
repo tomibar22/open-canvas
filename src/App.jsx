@@ -422,10 +422,18 @@ export default function App() {
 
   const clearLongTimer = () => { if (longTimer.current) { clearTimeout(longTimer.current); longTimer.current = null } }
 
+  /* a primary pointerdown starts a fresh interaction — purge any ghost
+     pointers left behind when the OS swallowed a pointerup mid-gesture */
+  const trackPointer = (e) => {
+    if (e.isPrimary) pointers.current.clear()
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+  }
+
   const startPinchIfTwo = () => {
     if (pointers.current.size !== 2) return false
-    clearLongTimer()
     const [p1, p2] = [...pointers.current.values()]
+    if (dist(p1, p2) < 20) return false // two real fingers never land this close — ghost pointer
+    clearLongTimer()
     const c = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 }
     const v = viewRef.current
     gesture.current = {
@@ -443,7 +451,7 @@ export default function App() {
   const beginElementGesture = (id, e) => {
     e.stopPropagation()
     const pt = { x: e.clientX, y: e.clientY }
-    pointers.current.set(e.pointerId, pt)
+    trackPointer(e)
     if (startPinchIfTwo()) return
     if (spaceDown.current) { beginCanvasGesture(e, true); return }
 
@@ -484,7 +492,7 @@ export default function App() {
 
   const beginCanvasGesture = (e, forcePan = false) => {
     const pt = { x: e.clientX, y: e.clientY }
-    pointers.current.set(e.pointerId, pt)
+    trackPointer(e)
     if (startPinchIfTwo()) return
     if (toolRef.current === 'draw' && !forcePan) {
       const w = toWorld(pt.x, pt.y)
@@ -508,14 +516,14 @@ export default function App() {
   const beginHandleGesture = (el, e) => {
     e.stopPropagation()
     const pt = { x: e.clientX, y: e.clientY }
-    pointers.current.set(e.pointerId, pt)
+    trackPointer(e)
     gesture.current = { type: 'resize', id: el.id, docBefore: docRef.current }
   }
 
   const onPointerMove = useCallback((e) => {
     if (!pointers.current.has(e.pointerId)) return
     const pt = { x: e.clientX, y: e.clientY }
-    pointers.current.set(e.pointerId, pt)
+    trackPointer(e)
     const g = gesture.current
     if (!g) return
 
@@ -816,12 +824,12 @@ export default function App() {
   /* toolbar / library drag sources */
   const beginToolDrag = (shape) => (e) => {
     e.stopPropagation()
-    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    trackPointer(e)
     gesture.current = { type: 'toolDrag', shape, start: { x: e.clientX, y: e.clientY }, moved: false }
   }
   const beginLibDrag = (asset) => (e) => {
     e.stopPropagation()
-    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    trackPointer(e)
     gesture.current = { type: 'libDrag', asset, start: { x: e.clientX, y: e.clientY }, moved: false }
   }
 
@@ -1021,22 +1029,22 @@ export default function App() {
         </div>
       )}
 
-      {/* ---- action bar ---- */}
-      {barPos && sel.size > 0 && (
+      {/* ---- selection panel: fixed beside the left dock ---- */}
+      {sel.size > 0 && (
         <div style={{
-          position: 'absolute',
-          left: clamp(barPos.x, 200, window.innerWidth - 200),
-          top: Math.max(barPos.y - 48, 12),
-          transform: 'translate(-50%, 0)',
-          display: 'flex', gap: 1, alignItems: 'stretch',
+          position: 'absolute', left: 148, top: '50%', transform: 'translateY(-50%)',
+          display: 'flex', flexDirection: 'column', alignItems: 'stretch',
           border: `1px solid ${INK}`, background: PAPER,
+          maxHeight: '84vh', overflowY: 'auto',
         }}>
           {singleGroupId ? (
             <>
               <BarBtn label="REDIST" onClick={() => redistributeGroup(singleGroupId)} />
-              <BarBtn label="−" wide={false} onClick={() => setGroupCount(singleGroupId, selEls.length - 1)} />
-              <div style={{ ...barBtnStyle, cursor: 'default', minWidth: 26, textAlign: 'center' }}>{selEls.length}</div>
-              <BarBtn label="+" wide={false} onClick={() => setGroupCount(singleGroupId, selEls.length + 1)} />
+              <div style={{ display: 'flex', justifyContent: 'center' }}>
+                <BarBtn label="−" wide={false} onClick={() => setGroupCount(singleGroupId, selEls.length - 1)} />
+                <div style={{ ...barBtnStyle, cursor: 'default', minWidth: 26, textAlign: 'center' }}>{selEls.length}</div>
+                <BarBtn label="+" wide={false} onClick={() => setGroupCount(singleGroupId, selEls.length + 1)} />
+              </div>
               <BarBtn label="DUP ↓" onClick={() => duplicateGroupBelow(singleGroupId)} />
               <BarBtn label="UNGROUP" onClick={ungroupSelection} />
             </>
@@ -1048,7 +1056,8 @@ export default function App() {
               {anyGrouped && <BarBtn label="UNGROUP" onClick={ungroupSelection} />}
             </>
           )}
-          {/* color target: palette taps recolor FILL or LINE of the selection */}
+          <div style={{ height: 1, background: 'rgba(26,26,26,0.15)' }} />
+          {/* color target: palette taps recolor FILL or LINE */}
           {(() => {
             const first = selEls[0]
             const fillC = first ? (first.color || INK) : INK
@@ -1059,24 +1068,26 @@ export default function App() {
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={() => setColorTarget(target)}
                 style={{
-                  ...barBtnStyle, display: 'flex', alignItems: 'center', gap: 6,
+                  ...barBtnStyle, flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
                   color: colorTarget === target ? ACCENT : INK,
                   borderBottom: colorTarget === target ? `2px solid ${ACCENT}` : '2px solid transparent',
                 }}
               >{dot}{label}</button>
             )
             return (
-              <>
+              <div style={{ display: 'flex' }}>
                 {chip('fill', 'FILL', <span style={{ width: 12, height: 12, borderRadius: '50%', background: fillC, display: 'inline-block' }} />)}
                 {chip('line', 'LINE', <span style={{ width: 12, height: 12, borderRadius: '50%', border: `2.5px solid ${lineC}`, display: 'inline-block' }} />)}
-              </>
+              </div>
             )
           })()}
-          <BarBtn label="−" wide={false} onClick={() => scaleSelection(1 / 1.2)} />
-          <div style={{ ...barBtnStyle, cursor: 'default', padding: '12px 2px', opacity: 0.55 }}>SIZE</div>
-          <BarBtn label="+" wide={false} onClick={() => scaleSelection(1.2)} />
+          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+            <BarBtn label="−" wide={false} onClick={() => scaleSelection(1 / 1.2)} />
+            <div style={{ ...barBtnStyle, cursor: 'default', padding: '13px 4px', opacity: 0.55 }}>SIZE</div>
+            <BarBtn label="+" wide={false} onClick={() => scaleSelection(1.2)} />
+          </div>
           {selEls.length > 0 && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '6px 8px 10px' }}>
               {[1.25, 2.5, 5].map(w => (
                 <button
                   key={w}
@@ -1096,6 +1107,7 @@ export default function App() {
               ))}
             </div>
           )}
+          <div style={{ height: 1, background: 'rgba(26,26,26,0.15)' }} />
           <BarBtn label="SAVE" onClick={saveAsset} />
           <BarBtn label="DELETE" accent onClick={deleteSelection} />
         </div>
