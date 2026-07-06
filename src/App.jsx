@@ -1070,7 +1070,7 @@ export default function App() {
           <BarBtn label="−" wide={false} onClick={() => scaleSelection(1 / 1.2)} />
           <div style={{ ...barBtnStyle, cursor: 'default', padding: '12px 2px', opacity: 0.55 }}>SIZE</div>
           <BarBtn label="+" wide={false} onClick={() => scaleSelection(1.2)} />
-          {selEls.some(e => e.type === 'ink' || !e.filled) && (
+          {selEls.length > 0 && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 8px' }}>
               {[1.25, 2.5, 5].map(w => (
                 <button
