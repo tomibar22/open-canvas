@@ -1195,8 +1195,9 @@ export default function App() {
         maxHeight: '92vh',
       }}>
         {selectionPanel}
-        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-        {/* palette column (outermost — easiest thumb reach) */}
+        {/* tools first (leftmost, under the selection panel), palette second */}
+        <div style={{ display: 'flex', flexDirection: 'row-reverse', gap: 12, alignItems: 'center' }}>
+        {/* palette column */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: '6px 4px', alignItems: 'center' }}>
           {PALETTE.map(c => (
             <button
@@ -1279,10 +1280,10 @@ export default function App() {
         </ToolBtn>
         <div style={{ height: 1, background: INK }} />
         <ToolBtn onPointerDown={(e) => { e.stopPropagation() }} onClick={undo}>
-          <span style={{ fontSize: 20, color: INK }}>↺</span>
+          <span style={{ fontSize: 28, color: INK }}>↺</span>
         </ToolBtn>
         <ToolBtn onPointerDown={(e) => { e.stopPropagation() }} onClick={redo}>
-          <span style={{ fontSize: 20, color: INK }}>↻</span>
+          <span style={{ fontSize: 28, color: INK }}>↻</span>
         </ToolBtn>
         </div>
         </div>
