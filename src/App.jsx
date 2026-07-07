@@ -892,8 +892,9 @@ export default function App() {
   const pct = Math.round(view.scale * 100)
 
   /* compact, icon-based selection panel (rendered above the left dock) */
+  const PANEL_W = 74
   const ib = (accent) => ({
-    width: 50, height: 42, display: 'flex', alignItems: 'center', justifyContent: 'center',
+    width: PANEL_W, height: 46, display: 'flex', alignItems: 'center', justifyContent: 'center',
     background: PAPER, border: 'none', cursor: 'pointer', padding: 0, color: accent ? ACCENT : INK,
   })
   const IB = ({ title, accent, onClick, children }) => (
@@ -907,10 +908,10 @@ export default function App() {
           <IB title="Redistribute evenly" onClick={() => redistributeGroup(singleGroupId)}>
             <svg {...svgP}><circle cx="3.5" cy="9" r="1.8" fill="currentColor" stroke="none" /><circle cx="9" cy="9" r="1.8" fill="currentColor" stroke="none" /><circle cx="14.5" cy="9" r="1.8" fill="currentColor" stroke="none" /></svg>
           </IB>
-          <div style={{ display: 'flex', background: PAPER, alignItems: 'center', justifyContent: 'space-between' }}>
-            <button onPointerDown={(e) => e.stopPropagation()} onClick={() => setGroupCount(singleGroupId, selEls.length - 1)} style={{ ...ib(), width: 18, fontSize: 15 }}>−</button>
-            <span style={{ font: '12px "Helvetica Neue", Inter, sans-serif', color: INK }}>{selEls.length}</span>
-            <button onPointerDown={(e) => e.stopPropagation()} onClick={() => setGroupCount(singleGroupId, selEls.length + 1)} style={{ ...ib(), width: 18, fontSize: 15 }}>+</button>
+          <div style={{ display: 'flex', background: PAPER, alignItems: 'center' }}>
+            <button onPointerDown={(e) => e.stopPropagation()} onClick={() => setGroupCount(singleGroupId, selEls.length - 1)} style={{ ...ib(), width: PANEL_W / 3, fontSize: 18 }}>−</button>
+            <span style={{ flex: 1, textAlign: 'center', font: '13px "Helvetica Neue", Inter, sans-serif', color: INK }}>{selEls.length}</span>
+            <button onPointerDown={(e) => e.stopPropagation()} onClick={() => setGroupCount(singleGroupId, selEls.length + 1)} style={{ ...ib(), width: PANEL_W / 3, fontSize: 18 }}>+</button>
           </div>
           <IB title="Duplicate below" onClick={() => duplicateGroupBelow(singleGroupId)}>
             <svg {...svgP}><rect x="3" y="2" width="12" height="6.5" rx="1" strokeWidth="1.2" /><path d="M9 10 L9 15 M6.5 12.5 L9 15 L11.5 12.5" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" /></svg>
@@ -949,28 +950,28 @@ export default function App() {
         const chip = (target, dot) => (
           <button key={target} onPointerDown={(e) => e.stopPropagation()} onClick={() => setColorTarget(target)}
             title={target === 'fill' ? 'Recolor fill' : 'Recolor outline'}
-            style={{ ...ib(), width: 25, borderBottom: colorTarget === target ? `2px solid ${ACCENT}` : '2px solid transparent' }}>
+            style={{ ...ib(), width: PANEL_W / 2, borderBottom: colorTarget === target ? `2px solid ${ACCENT}` : '2px solid transparent' }}>
             {dot}
           </button>
         )
         return (
-          <div style={{ display: 'flex', background: PAPER, justifyContent: 'center' }}>
-            {chip('fill', <span style={{ width: 13, height: 13, borderRadius: '50%', background: fillC, display: 'inline-block' }} />)}
-            {chip('line', <span style={{ width: 13, height: 13, borderRadius: '50%', border: `2.5px solid ${lineC}`, display: 'inline-block' }} />)}
+          <div style={{ display: 'flex', background: PAPER }}>
+            {chip('fill', <span style={{ width: 15, height: 15, borderRadius: '50%', background: fillC, display: 'inline-block' }} />)}
+            {chip('line', <span style={{ width: 15, height: 15, borderRadius: '50%', border: `2.5px solid ${lineC}`, display: 'inline-block' }} />)}
           </div>
         )
       })()}
       {/* size */}
-      <div style={{ display: 'flex', background: PAPER, alignItems: 'center', justifyContent: 'space-between' }}>
-        <button onPointerDown={(e) => e.stopPropagation()} onClick={() => scaleSelection(1 / 1.2)} title="Smaller" style={{ ...ib(), width: 25, fontSize: 16 }}>−</button>
-        <button onPointerDown={(e) => e.stopPropagation()} onClick={() => scaleSelection(1.2)} title="Larger" style={{ ...ib(), width: 25, fontSize: 16 }}>+</button>
+      <div style={{ display: 'flex', background: PAPER }}>
+        <button onPointerDown={(e) => e.stopPropagation()} onClick={() => scaleSelection(1 / 1.2)} title="Smaller" style={{ ...ib(), width: PANEL_W / 2, fontSize: 20 }}>−</button>
+        <button onPointerDown={(e) => e.stopPropagation()} onClick={() => scaleSelection(1.2)} title="Larger" style={{ ...ib(), width: PANEL_W / 2, fontSize: 20 }}>+</button>
       </div>
       {/* stroke weight */}
-      <div style={{ display: 'flex', background: PAPER, gap: 3, justifyContent: 'center', padding: '5px 2px' }}>
+      <div style={{ display: 'flex', background: PAPER }}>
         {[1.25, 2.5, 5].map(w => (
           <button key={w} onPointerDown={(e) => e.stopPropagation()} onClick={() => setSelWeight(w)} title={`Stroke ${w}`}
-            style={{ width: 13, height: 20, padding: 0, cursor: 'pointer', background: 'transparent', border: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <svg width="12" height="16"><line x1="6" y1="2" x2="6" y2="14" stroke={INK} strokeWidth={w === 1.25 ? 1.5 : w === 2.5 ? 3 : 5} strokeLinecap="round" /></svg>
+            style={{ width: PANEL_W / 3, height: 34, padding: 0, cursor: 'pointer', background: 'transparent', border: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <svg width="18" height="18"><line x1="9" y1="3" x2="9" y2="15" stroke={INK} strokeWidth={w === 1.25 ? 1.5 : w === 2.5 ? 3 : 5} strokeLinecap="round" /></svg>
           </button>
         ))}
       </div>
