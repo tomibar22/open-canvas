@@ -260,12 +260,13 @@ export function computeSnap(movingEls, statics, th) {
 
 /* ---------- quantize ---------- */
 /*
- Conservative auto-structure, like Ableton quantize: small corrections
- toward structure that is already almost there, never big rearrangements.
- One pass per axis: cluster -> align to median (outliers stay put) ->
- equal-space lines whose gaps are already roughly even (max/min <= 2.4,
- shifts <= 60% of the median gap). Sizes within 18% equalize.
- Groups move as single units. Returns new elements or null.
+ Decisive auto-structure, like Ableton quantize: roughly lay out the
+ symmetric arrangement the shapes are reaching for. One pass per axis:
+ cluster by the perpendicular coord (size-relative tolerance so separate
+ constellations stay apart), snap the whole cluster to its mean, then
+ evenly redistribute along the span. Sizes within 25% equalize. Groups
+ move as single units. Scope = selection when any, else the whole page.
+ Returns new elements or null.
 */
 export function quantizeElements(elements, selIds) {
   const scoped = selIds && selIds.size ? elements.filter(e => selIds.has(e.id)) : elements
@@ -280,53 +281,43 @@ export function quantizeElements(elements, selIds) {
     const bb = bboxOf(els)
     return { els, cx: bb.cx, cy: bb.cy, w: Math.max(bb.w, 1), h: Math.max(bb.h, 1) }
   })
-  const median = a2 => { const t = [...a2].sort((x, y) => x - y), m = t.length >> 1; return t.length % 2 ? t[m] : (t[m - 1] + t[m]) / 2 }
 
   const axis = (main, perp, dim) => {
-    const sorted = [...units].sort((a2, b) => a2[perp] - b[perp])
+    const sorted = [...units].sort((a, b) => a[perp] - b[perp])
     const clusters = [[sorted[0]]]
     for (let i = 1; i < sorted.length; i++) {
       const cl = clusters[clusters.length - 1]
-      const mean = cl.reduce((s2, u) => s2 + u[perp], 0) / cl.length
-      const tol = clamp(0.45 * Math.min(sorted[i][dim], cl[cl.length - 1][dim]), 10, 36)
+      const mean = cl.reduce((s, u) => s + u[perp], 0) / cl.length
+      const tol = clamp(0.8 * Math.min(sorted[i][dim], cl[cl.length - 1][dim]), 22, 64)
       if (sorted[i][perp] - mean <= tol) cl.push(sorted[i])
       else clusters.push([sorted[i]])
     }
     for (const cl of clusters) {
       if (cl.length < 2) continue
-      const t0 = median(cl.map(u => u[perp]))
-      const movers = cl.filter(u => Math.abs(u[perp] - t0) <= Math.max(0.6 * u[dim], 8))
-      if (movers.length < 2) continue
-      const t = median(movers.map(u => u[perp]))
-      movers.forEach(u => { u[perp] = t })
-      // equal spacing along the aligned line
-      const line = movers.sort((a2, b) => a2[main] - b[main])
-      if (line.length < 3) continue
-      const gaps = line.slice(1).map((u, i) => u[main] - line[i][main])
-      if (Math.min(...gaps) <= 0 || Math.max(...gaps) / Math.min(...gaps) > 2.4) continue
-      const gMed = median(gaps)
-      const a1 = line[0][main], b1 = line[line.length - 1][main]
-      const targets = line.map((u, i) => a1 + (b1 - a1) * i / (line.length - 1))
-      if (line.some((u, i) => Math.abs(targets[i] - u[main]) > 0.6 * gMed)) continue
-      line.forEach((u, i) => { u[main] = targets[i] })
+      const t = cl.reduce((s, u) => s + u[perp], 0) / cl.length
+      cl.forEach(u => { u[perp] = t })
+      if (cl.length < 3) continue
+      const line = cl.sort((a, b) => a[main] - b[main])
+      const a0 = line[0][main], b0 = line[line.length - 1][main]
+      line.forEach((u, i) => { u[main] = a0 + (b0 - a0) * i / (line.length - 1) })
     }
   }
   axis("cx", "cy", "h") // rows
   axis("cy", "cx", "w") // columns
 
-  // equalize near-identical sizes (free shape elements only)
+  // equalize similar sizes (free shape elements)
   const newSizes = new Map()
-  const shapes = scoped.filter(e => e.size && !e.groupId).sort((a2, b) => a2.size - b.size)
+  const shapes = scoped.filter(e => e.size && !e.groupId).sort((a, b) => a.size - b.size)
   let run = []
   const flush = () => {
     if (run.length >= 2) {
-      const m = run.reduce((s2, e) => s2 + e.size, 0) / run.length
+      const m = run.reduce((s, e) => s + e.size, 0) / run.length
       run.forEach(e => { if (Math.abs(m - e.size) > 0.01) newSizes.set(e.id, m) })
     }
     run = []
   }
   for (const e of shapes) {
-    if (run.length && e.size / run[run.length - 1].size > 1.18) flush()
+    if (run.length && e.size / run[run.length - 1].size > 1.25) flush()
     run.push(e)
   }
   flush()

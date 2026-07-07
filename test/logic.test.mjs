@@ -25,18 +25,18 @@ test('messy row: aligns y and equalizes near-even gaps', () => {
   assert.equal(xs[0], 300); assert.equal(xs[2], 452) // span preserved
 })
 
-test('intentionally uneven gaps (2 close + 1 far): no respacing', () => {
+test('uneven gaps get evened out across the span', () => {
   const els = [circle('a', 300, 400), circle('b', 344, 400), circle('c', 600, 400)]
-  const out = quantizeElements(els, null) // may be null (nothing to fix)
-  const xs = (out || els).map(e => e.x).sort((a, b) => a - b)
-  assert.deepEqual(xs, [300, 344, 600], 'x positions untouched')
+  const out = quantizeElements(els, null)
+  const xs = out.map(e => e.x).sort((a, b) => a - b)
+  assert.deepEqual(xs, [300, 450, 600], 'middle centered, span preserved')
 })
 
-test('vertical outlier is not dragged into the row', () => {
+test('far vertical outlier stays out of an unrelated row', () => {
   const els = [circle('a', 300, 398), circle('b', 380, 403), circle('c', 460, 400), circle('d', 540, 470)]
   const out = quantizeElements(els, null)
   const d = out.find(e => e.id === 'd')
-  assert.equal(Math.round(d.y), 470, 'outlier y unchanged')
+  assert.equal(Math.round(d.y), 470, 'far outlier (70px) unchanged')
   const rowYs = new Set(out.filter(e => e.id !== 'd').map(e => Math.round(e.y)))
   assert.equal(rowYs.size, 1, 'row still aligns')
 })
